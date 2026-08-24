@@ -2,118 +2,10 @@
 
 import * as fs from "node:fs";
 
-async function main() {
+function main() {
   // ここに処理を記述します
 
-  let F = (await nextAwait()).split(" ").map(Number);
-  let N = 10, V = 100;
-  let board = Array(V).fill(0);
-  let dirs = ["F","B","L","R"];
-  let tilt = (A,d) => {
-    let B = Array(V).fill(0);
-    if (d == 0 || d == 1) {
-      for (let j = 0; j < N; j++) {
-        let vals: number[] = [];
-        for (let i = 0; i < N; i++) {
-          let x = A[i*N+j];
-          if (x != 0) vals.push(x);
-        }
-        let start = d == 0 ? 0 : N-vals.length;
-        for (let k = 0; k < vals.length; k++) {
-          B[(start+k)*N+j] = vals[k];
-        }
-      }
-    } else {
-      for (let i = 0; i < N ; i++) {
-        let vals: number[] = [];
-        for (let j = 0; j < N; j++) {
-          let x = A[i*N+j];
-          if (x != 0) vals.push(x);
-        }
-        let start = d == 2 ? 0 : N-vals.length;
-        for (let k = 0; k < vals.length; k++) {
-          B[i*N+start+k] = vals[k];
-        }
-      }
-    }
-    return B;
-  };
-  let calcValue = (A) => {
-    let used = Array(V).fill(false);
-    let value = 0;
-    for (let s = 0; s < V; s++) {
-      if (A[s] == 0 || used[s]) continue;
-      let que = [s];
-      let idx = 0;
-      let cnt = 0;
-      used[s] = true;
-      while (idx < que.length) {
-        let pos = que[idx++];
-        cnt++;
-        let i = intDiv(pos,N), j = pos%N;
-        for (let [di,dj] of dxy4) {
-          let ni = i+di, nj = j+dj;
-          if (ni < 0 || ni >= N || nj < 0 || nj >= N) continue;
-          let npos = ni*N+nj;
-          if (used[npos] || A[npos] != A[pos]) continue;
-          used[npos] = true;
-          que.push(npos);
-        }
-      }
-      value += cnt*cnt;
-    }
-    return value;
-  };
-  let expectedNextValue = (A,nextFlavor) => {
-    let empty: number[] = [];
-    for (let pos = 0; pos < V; pos++) {
-      if (A[pos] == 0) empty.push(pos);
-    }
-    if (empty.length == 0) return 1.0*calcValue(A);
-    let sum = 0.0;
-    for (let pos of empty) {
-      A[pos] = nextFlavor;
-      let best = -1;
-      for (let d = 0; d < 4; d++) {
-        let B = tilt(A,d);
-        best = Math.max(best,calcValue(B));
-      }
-      sum += best;
-      A[pos] = 0;
-    }
-    return sum/empty.length;
-  }
-  for (let t = 0; t < 100; t++) {
-    let p = Number(await nextAwait());
-    let cnt = 0;
-    for (let pos = 0; pos < V; pos++) {
-      if (board[pos] != 0) continue;
-      cnt++;
-      if (cnt == p) {
-        board[pos] = F[t];
-        break;
-      }
-    }
-    let bestDir = 0;
-    let bestValue = -1.0;
-    let bestBoard = board;
-    for (let d = 0; d < 4; d++) {
-      let nextBoard = tilt(board,d);
-      let value: number;
-      if (t == 99) {
-        value = calcValue(nextBoard);
-      } else {
-        value = expectedNextValue(nextBoard,F[t+1]);
-      }
-      if (value > bestValue) {
-        bestValue = value;
-        bestDir = d;
-        bestBoard = nextBoard;
-      }
-    }
-    board = bestBoard;
-    console.log(dirs[bestDir]);
-  }
+  
 
   // 処理終了
 }
@@ -158,19 +50,19 @@ let dxy4 = [[-1,0],[0,1],[1,0],[0,-1]];
 let dxy8 = [[-1,0],[-1,1],[0,1],[1,1],[1,0],[1,-1],[0,-1],[-1,-1]];
 let dir4 = ["U","R","D","L"];
 
-// インタラクティブ用
-// お決まりのインプットはコメントアウト、main関数にasyncを忘れない
-// 詳しくは典型ABC305-Fをチェック
-const readline = require("readline");
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-const it = rl[Symbol.asyncIterator]();
-const nextAwait = async () => {
-  const { value } = await it.next();
-  return value.trim();
-};
+// // インタラクティブ用
+// // お決まりのインプットはコメントアウト、main関数にasyncを忘れない
+// // 詳しくは典型ABC305-Fをチェック
+// const readline = require("readline");
+// const rl = readline.createInterface({
+//   input: process.stdin,
+//   output: process.stdout,
+// });
+// const it = rl[Symbol.asyncIterator]();
+// const nextAwait = async () => {
+//   const { value } = await it.next();
+//   return value.trim();
+// };
 
 function next() {
   return inputArray[currentIndex++];
@@ -10546,7 +10438,11 @@ function readInput() {
   return fs.readFileSync(0, "utf8");
 }
 
-// inputs = readInput();
-// inputArray = inputs.trim().split(/\s+/);
+inputs = readInput();
+inputArray = inputs.trim().split(/\s+/);
 main();
-// flush();
+flush();
+
+/**
+ * https://github.com/occhanCode/atcoder-templates/blob/main/src/main.ts
+ */

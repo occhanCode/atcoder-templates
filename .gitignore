@@ -1,0 +1,20 @@
+*
+# GitHub 管理用
+!.gitignore
+!README.md
+
+# TypeScript テンプレート
+!src/
+src/*
+!src/main.ts
+
+# C++ テンプレート
+!cpp/
+cpp/*
+!cpp/main.cpp
+
+# TypeScript -> C++ コンバータ
+!ts2cpp/
+ts2cpp/*
+!ts2cpp/README.md
+!ts2cpp/ts_main_to_cpp.mjs

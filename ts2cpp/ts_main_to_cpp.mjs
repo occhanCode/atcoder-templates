@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v15.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v15.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v15.mjs > main.cpp
+ *   node ts_main_to_cpp_v16.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v16.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v16.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v15.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v16.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -305,7 +305,7 @@ class Converter {
       'main','next','nextNum','nextNums','nextBigInt','nextBigInts','nexts','nextAwait',
       'print','println','flush','intDiv','lowerBound','upperBound','builtin_popcount',
       'Math','Number','BigInt','String','Array','Set','Map','console','Infinity',
-      'true','false','undefined',
+      'true','false','undefined','less','greater',
       // AHC runtime is provided natively on the C++ side.
       'Timer','RNG','Annealing','seedFromClock'
     ]);
@@ -659,6 +659,10 @@ class Converter {
       }
       // TypeScriptでは文字列との + / += は相手を自動的に文字列化する。
       // C++ の string += int は文字コードを追加してしまうため明示的に変換する。
+      // TypeScript number division is floating-point. Integer division in the user's template is explicit via intDiv().
+      if (op==='/') {
+        return `((double)(${this.emitExpr(node.left,lt)})/(double)(${this.emitExpr(node.right,rt)}))`;
+      }
       if (op==='+' || op==='+=') {
         const lstr=lt.kind==='string' || lt.kind==='char';
         const rstr=rt.kind==='string' || rt.kind==='char';
@@ -733,6 +737,10 @@ class Converter {
   }
 
   emitComparator(fn) {
+    // The user's TS template defines less/greater as three-way comparators (-1/0/1).
+    // std::sort requires a boolean strict-weak-order comparator, so map them explicitly.
+    if (ts.isIdentifier(fn) && fn.text==='less') return null; // ascending default
+    if (ts.isIdentifier(fn) && fn.text==='greater') return `[](const auto& a,const auto& b){ return a>b; }`;
     if (!(ts.isArrowFunction(fn)||ts.isFunctionExpression(fn))) return this.emitExpr(fn);
     const params=fn.parameters.map(p=>p.name.getText(this.sf));
     if (params.length<2) return this.emitLambda(fn);
@@ -828,7 +836,11 @@ class Converter {
         if ((name==='min'||name==='max') && args.length===2 && args.some(x=>this.exprUsesReal(x)||this.inferExpr(x).kind==='real')) {
           return `${name}<double>(${args.map(x=>this.emitExpr(x)).join(',')})`;
         }
-        const mp={min:'min',max:'max',abs:'abs',floor:'floor',ceil:'ceil',round:'llround',sqrt:'sqrt',pow:'pow',trunc:'trunc',exp:'exp'};
+        if (name==='round' && args.length===1) {
+          // JS Math.round(x) is floor(x+0.5) (ignoring the irrelevant -0 distinction).
+          return `(ll)floor((${this.emitExpr(args[0])})+0.5)`;
+        }
+        const mp={min:'min',max:'max',abs:'abs',floor:'floor',ceil:'ceil',sqrt:'sqrt',pow:'pow',trunc:'trunc',exp:'exp'};
         return `${mp[name]||name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
       }
       if (objNode.getText(this.sf)==='String' && name==='fromCharCode') return `char(${this.emitExpr(args[0])})`;
@@ -1247,6 +1259,12 @@ class Converter {
       }
     }
 
+    // Destructuring assignment from input, e.g. [X[i],Y[i]] = nextNums(2).
+    if (ts.isBinaryExpression(e) && e.operatorToken.kind===ts.SyntaxKind.EqualsToken && ts.isArrayLiteralExpression(e.left) && ts.isCallExpression(e.right) && ts.isIdentifier(e.right.expression) && ['nextNums','nextBigInts'].includes(e.right.expression.text)) {
+      const L=e.left.elements;
+      return `cin>>${L.map(x=>this.emitExpr(x)).join('>>')};`;
+    }
+
     // Destructuring assignment / swap.
     if (ts.isBinaryExpression(e) && e.operatorToken.kind===ts.SyntaxKind.EqualsToken && ts.isArrayLiteralExpression(e.left) && ts.isArrayLiteralExpression(e.right)) {
       const L=e.left.elements, R=e.right.elements;
@@ -1259,6 +1277,22 @@ class Converter {
   }
 
   emitOutput(kind,args) {
+    // User template overload: println(array, separator) / print(array, separator).
+    if (args.length===2 && ts.isStringLiteral(args[1])) {
+      const sep=JSON.stringify(args[1].text);
+      if (ts.isArrayLiteralExpression(args[0])) {
+        const es=args[0].elements.map(x=>this.emitExpr(x));
+        let out='cout';
+        for (let i=0;i<es.length;i++) {
+          if (i) out+=`<<${sep}`;
+          out+=`<<${es[i]}`;
+        }
+        if (kind==='println') out+=`<<'\\n'`;
+        return out+';';
+      }
+      const obj=this.emitExpr(args[0]);
+      return `for(int i=0;i<(int)${obj}.size();i++){ if(i) cout<<${sep}; cout<<${obj}[i]; }${kind==='println'?" cout<<'\n';":''}`;
+    }
     if (args.length===1 && ts.isCallExpression(args[0]) && ts.isPropertyAccessExpression(args[0].expression) && args[0].expression.name.text==='join') {
       const call=args[0], obj=this.emitExpr(call.expression.expression), sep=call.arguments[0]&&ts.isStringLiteral(call.arguments[0])?call.arguments[0].text:' ';
       if (sep===' ') return `for(int i=0;i<(int)${obj}.size();i++){ if(i) cout<<' '; cout<<${obj}[i]; }${kind==='println'?" cout<<'\\n';":''}`;
@@ -1339,7 +1373,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v14',
+      '// Generated by ts_main_to_cpp_v16',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',

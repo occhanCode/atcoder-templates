@@ -10648,6 +10648,294 @@ class MonteCarlo {
   }
 }
 
+/**
+ * 説明:
+ *   Zobrist Hash 用の64bit乱数表を持つ。
+ *   盤面などの状態を1箇所変更したとき、O(1)でhashを更新できる。
+ *
+ * 使い方:
+ *   let zob = new ZobristHash(N,K);
+ *   let hash = 0n;
+ *   for (let i = 0; i < N; i++) hash ^= zob.value(i,a[i]);
+ *
+ *   // a[p] : oldValue -> newValue
+ *   hash = zob.changed(hash,p,oldValue,newValue);
+ *
+ *   // 1要素をxorで追加・削除
+ *   hash = zob.toggled(hash,p,state);
+ *
+ * 計算量:
+ *   初期化: O(NK)
+ *   value / changed / toggled: O(1)
+ *
+ * 注意:
+ *   hash衝突は理論上あり得る。AHCでは通常64bitで十分。
+ *   TypeScriptでは64bitを正確に扱うためbigintを使用する。
+ *   C++版とは乱数表そのものは一致しなくてもよく、状態一致判定には影響しない。
+ * 
+ * 用例: AHC021
+ */
+class ZobristHash {
+  n = 0;
+  kinds = 0;
+  table: bigint[] = [];
+
+  private static MASK64 = (1n<<64n)-1n;
+  private static STEP = 0x9e3779b97f4a7c15n;
+
+  constructor(
+    n: number = 0,
+    kinds: number = 0,
+    seed: bigint = 0x6a09e667f3bcc909n
+  ) {
+    if (n != 0 || kinds != 0) this.init(n,kinds,seed);
+  }
+
+  private static splitmix64(x: bigint): bigint {
+    x = (x+0x9e3779b97f4a7c15n)&ZobristHash.MASK64;
+    x = ((x^(x>>30n))*0xbf58476d1ce4e5b9n)&ZobristHash.MASK64;
+    x = ((x^(x>>27n))*0x94d049bb133111ebn)&ZobristHash.MASK64;
+    return (x^(x>>31n))&ZobristHash.MASK64;
+  }
+
+  init(
+    n: number,
+    kinds: number,
+    seed: bigint = 0x6a09e667f3bcc909n
+  ): void {
+    if (n < 0 || kinds < 0) throw new RangeError("n and kinds must be non-negative");
+    this.n = n;
+    this.kinds = kinds;
+    this.table = Array(n*kinds).fill(0n);
+
+    let x = seed&ZobristHash.MASK64;
+    for (let i = 0; i < this.table.length; i++) {
+      x = (x+ZobristHash.STEP)&ZobristHash.MASK64;
+      this.table[i] = ZobristHash.splitmix64(x);
+    }
+  }
+
+  value(index: number, state: number): bigint {
+    return this.table[index*this.kinds+state];
+  }
+
+  changed(
+    hash: bigint,
+    index: number,
+    oldState: number,
+    newState: number
+  ): bigint {
+    if (oldState == newState) return hash;
+    return hash^this.value(index,oldState)^this.value(index,newState);
+  }
+
+  toggled(hash: bigint, index: number, state: number): bigint {
+    return hash^this.value(index,state);
+  }
+}
+
+/**
+ * Beam Search の探索結果。
+ */
+type BeamResult<S> = {
+  bestState: S,
+  bestScore: number,
+  completedDepth: number,
+  generated: number
+};
+
+/**
+ * 説明:
+ *   Stateをコピーして進める汎用Beam Search。
+ *   expand(state,children) で子状態を列挙し、evaluate(state) の良い状態を
+ *   各depthで最大beamWidth個だけ残す。
+ *
+ *   max / min は深さまたは候補が尽きるまで探索する。
+ *   maxUntil / minUntil はTimerによる時間制限も加える。
+ *
+ * 使い方:
+ *   let result = BeamSearch.max(
+ *     initialState,
+ *     MAX_DEPTH,
+ *     BEAM_WIDTH,
+ *     (state,children) => {
+ *       children.push(nextState1);
+ *       children.push(nextState2);
+ *     },
+ *     state => state.score,
+ *     state => state.hash
+ *   );
+ *
+ *   result.bestState
+ *   result.bestScore
+ *   result.completedDepth
+ *   result.generated
+ *
+ * 計算量:
+ *   1depthあたり生成候補数をCとすると、TypeScript版は概ね O(C log C)。
+ *   deduplicate=true の重複除去は平均 O(C)。
+ *
+ * 注意:
+ *   Stateのコピーコストが大きい問題や巨大beamでは重くなる。
+ *   その場合は問題専用のapply/rollback型やEuler Tour Beam Searchへ移行する。
+ *   deduplicate=true の場合、同じhashの候補は評価値が良い方だけ残す。
+ *   hash衝突は同一状態として扱われる。
+ * 
+ * 用例: AHC021
+ */
+class BeamSearch {
+  private static run<S>(
+    initialState: S,
+    maxDepth: number,
+    beamWidth: number,
+    expand: (state: S, children: S[]) => void,
+    evaluate: (state: S) => number,
+    hashState: (state: S) => bigint,
+    maximize: boolean,
+    deduplicate: boolean,
+    timer: Timer | null,
+    timeLimit: number
+  ): BeamResult<S> {
+    if (maxDepth < 0) throw new RangeError("maxDepth must be non-negative");
+    if (beamWidth <= 0) throw new RangeError("beamWidth must be positive");
+
+    type Candidate = {
+      score: number,
+      hash: bigint,
+      state: S
+    };
+
+    let beam: S[] = [initialState];
+    let bestState = initialState;
+    let bestScore = evaluate(initialState);
+    let completedDepth = 0;
+    let generated = 0;
+
+    let children: S[] = [];
+
+    for (let depth = 0; depth < maxDepth; depth++) {
+      if (timer != null && timer.over(timeLimit)) break;
+
+      let cand: Candidate[] = [];
+      let pos = new Map<bigint,number>();
+      let timedOut = false;
+
+      for (let bi = 0; bi < beam.length; bi++) {
+        if (timer != null && (bi&63) == 0 && timer.over(timeLimit)) {
+          timedOut = true;
+          break;
+        }
+
+        children.length = 0;
+        expand(beam[bi],children);
+
+        for (let child of children) {
+          let score = evaluate(child);
+          let hash = hashState(child);
+          generated++;
+
+          if ((maximize && score > bestScore) || (!maximize && score < bestScore)) {
+            bestScore = score;
+            bestState = child;
+          }
+
+          if (!deduplicate) {
+            cand.push({score,hash,state: child});
+            continue;
+          }
+
+          let oldId = pos.get(hash);
+          if (oldId === undefined) {
+            pos.set(hash,cand.length);
+            cand.push({score,hash,state: child});
+          } else {
+            let old = cand[oldId];
+            if ((maximize && score > old.score) || (!maximize && score < old.score)) {
+              cand[oldId] = {score,hash,state: child};
+            }
+          }
+        }
+      }
+
+      if (cand.length == 0) break;
+
+      cand.sort((a,b) => maximize ? b.score-a.score : a.score-b.score);
+      if (cand.length > beamWidth) cand.length = beamWidth;
+
+      beam = cand.map(x => x.state);
+      completedDepth = depth+1;
+
+      if (timedOut) break;
+    }
+
+    return {bestState,bestScore,completedDepth,generated};
+  }
+
+  static max<S>(
+    initialState: S,
+    maxDepth: number,
+    beamWidth: number,
+    expand: (state: S, children: S[]) => void,
+    evaluate: (state: S) => number,
+    hashState: (state: S) => bigint,
+    deduplicate: boolean = true
+  ): BeamResult<S> {
+    return BeamSearch.run(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      true,deduplicate,null,Infinity
+    );
+  }
+
+  static min<S>(
+    initialState: S,
+    maxDepth: number,
+    beamWidth: number,
+    expand: (state: S, children: S[]) => void,
+    evaluate: (state: S) => number,
+    hashState: (state: S) => bigint,
+    deduplicate: boolean = true
+  ): BeamResult<S> {
+    return BeamSearch.run(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      false,deduplicate,null,Infinity
+    );
+  }
+
+  static maxUntil<S>(
+    initialState: S,
+    maxDepth: number,
+    beamWidth: number,
+    expand: (state: S, children: S[]) => void,
+    evaluate: (state: S) => number,
+    hashState: (state: S) => bigint,
+    timer: Timer,
+    timeLimit: number,
+    deduplicate: boolean = true
+  ): BeamResult<S> {
+    return BeamSearch.run(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      true,deduplicate,timer,timeLimit
+    );
+  }
+
+  static minUntil<S>(
+    initialState: S,
+    maxDepth: number,
+    beamWidth: number,
+    expand: (state: S, children: S[]) => void,
+    evaluate: (state: S) => number,
+    hashState: (state: S) => bigint,
+    timer: Timer,
+    timeLimit: number,
+    deduplicate: boolean = true
+  ): BeamResult<S> {
+    return BeamSearch.run(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      false,deduplicate,timer,timeLimit
+    );
+  }
+}
+
 // end
 
 function readInput() {

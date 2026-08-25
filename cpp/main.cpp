@@ -678,6 +678,17 @@ struct ZobristHash{
   void toggle(uint64_t& hash,int index,int state) const{
     hash^=value(index,state);
   }
+
+  // TypeScript版と共通で使える純関数型API。
+  uint64_t changed(uint64_t hash,int index,int oldState,int newState) const{
+    change(hash,index,oldState,newState);
+    return hash;
+  }
+
+  uint64_t toggled(uint64_t hash,int index,int state) const{
+    toggle(hash,index,state);
+    return hash;
+  }
 };
 
 // 任意整数を SplitMix64 で散らす補助。
@@ -933,6 +944,80 @@ BeamResult<State,Score> beamSearchMin(
   r.bestScore=-r.bestScore;
   return r;
 }
+
+struct BeamSearch{
+  template<class State,class Expand,class Evaluate,class Hash>
+  static auto max(
+    const State& initialState,
+    int maxDepth,
+    int beamWidth,
+    Expand expand,
+    Evaluate evaluate,
+    Hash hashState,
+    bool deduplicate=true
+  ){
+    using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+    return beamSearchMax<State,Score>(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      deduplicate,nullptr,numeric_limits<double>::infinity()
+    );
+  }
+
+  template<class State,class Expand,class Evaluate,class Hash>
+  static auto min(
+    const State& initialState,
+    int maxDepth,
+    int beamWidth,
+    Expand expand,
+    Evaluate evaluate,
+    Hash hashState,
+    bool deduplicate=true
+  ){
+    using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+    return beamSearchMin<State,Score>(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      deduplicate,nullptr,numeric_limits<double>::infinity()
+    );
+  }
+
+  template<class State,class Expand,class Evaluate,class Hash>
+  static auto maxUntil(
+    const State& initialState,
+    int maxDepth,
+    int beamWidth,
+    Expand expand,
+    Evaluate evaluate,
+    Hash hashState,
+    const Timer& timer,
+    double timeLimit,
+    bool deduplicate=true
+  ){
+    using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+    return beamSearchMax<State,Score>(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      deduplicate,&timer,timeLimit
+    );
+  }
+
+  template<class State,class Expand,class Evaluate,class Hash>
+  static auto minUntil(
+    const State& initialState,
+    int maxDepth,
+    int beamWidth,
+    Expand expand,
+    Evaluate evaluate,
+    Hash hashState,
+    const Timer& timer,
+    double timeLimit,
+    bool deduplicate=true
+  ){
+    using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+    return beamSearchMin<State,Score>(
+      initialState,maxDepth,beamWidth,expand,evaluate,hashState,
+      deduplicate,&timer,timeLimit
+    );
+  }
+};
 
 // ================================================================
 // Multi Start

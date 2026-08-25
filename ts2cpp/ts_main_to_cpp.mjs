@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v10.
+ * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v21.
  *
  * Design goal:
  *   - Parse TypeScript with the official TypeScript parser.
@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v16.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v16.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v16.mjs > main.cpp
+ *   node ts_main_to_cpp_v21.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v21.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v21.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     else if (a==='--cpp-template') r.cppTemplate=argv[++i];
     else if (a==='--deps') r.deps=true;
     else if (a==='--no-deps') r.deps=false;
-    else if (a==='--version') { console.log('ts_main_to_cpp_v15 15.0.0'); process.exit(0); }
+    else if (a==='--version') { console.log('ts_main_to_cpp_v21 21.0.0'); process.exit(0); }
     else if (a==='--double') {
       const v=argv[++i]; if (!v) throw new Error('--double requires a variable name or comma-separated names');
       r.doubleNames.push(...v.split(',').map(x=>x.trim()).filter(Boolean));
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v16.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v21.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -78,6 +78,7 @@ class TypeInfo {
   constructor(kind, opt={}) { this.kind=kind; Object.assign(this,opt); }
   static unknown(){ return new TypeInfo('unknown'); }
   static number(){ return new TypeInfo('number'); }
+  static u64(){ return new TypeInfo('u64'); }
   static real(){ return new TypeInfo('real'); }
   static char(){ return new TypeInfo('char'); }
   static tuple(elems=[]){ return new TypeInfo('tuple',{elems}); }
@@ -93,7 +94,7 @@ class TypeInfo {
 
 function sameType(a,b) {
   if (!a || !b || a.kind!==b.kind) return false;
-  if (['number','real','char','bool','string','unknown'].includes(a.kind)) return true;
+  if (['number','u64','real','char','bool','string','unknown'].includes(a.kind)) return true;
   if (a.kind==='custom') return a.name===b.name;
   if (a.kind==='vector' || a.kind==='set') return sameType(a.elem,b.elem);
   if (a.kind==='array') return a.size===b.size && sameType(a.elem,b.elem);
@@ -107,6 +108,7 @@ function mergeType(a,b) {
   if (!b || b.kind==='unknown') return a;
   if (sameType(a,b)) return a;
   if ((a.kind==='number'&&b.kind==='real')||(a.kind==='real'&&b.kind==='number')) return TypeInfo.real();
+  if ((a.kind==='number'&&b.kind==='u64')||(a.kind==='u64'&&b.kind==='number')) return TypeInfo.u64();
   if ((a.kind==='array'||a.kind==='vector') && (b.kind==='array'||b.kind==='vector')) {
     return TypeInfo.vector(mergeType(a.elem,b.elem));
   }
@@ -117,6 +119,7 @@ function typeToCpp(t) {
   if (!t) return 'auto';
   switch(t.kind) {
     case 'number': return NUM;
+    case 'u64': return 'uint64_t';
     case 'real': return 'double';
     case 'char': return 'char';
     case 'tuple': return `tuple<${t.elems.map(typeToCpp).join(',')}>`;
@@ -139,6 +142,17 @@ function promoteNumericToReal(t) {
   if (t.kind==='tuple') return TypeInfo.tuple(t.elems.map(promoteNumericToReal));
   if (t.kind==='set') return TypeInfo.set(promoteNumericToReal(t.elem));
   if (t.kind==='map') return TypeInfo.map(promoteNumericToReal(t.key),promoteNumericToReal(t.value));
+  return t;
+}
+
+function promoteNumericToU64(t) {
+  if (!t) return t;
+  if (t.kind==='number') return TypeInfo.u64();
+  if (t.kind==='vector') return TypeInfo.vector(promoteNumericToU64(t.elem));
+  if (t.kind==='array') return TypeInfo.array(promoteNumericToU64(t.elem),t.size);
+  if (t.kind==='tuple') return TypeInfo.tuple(t.elems.map(promoteNumericToU64));
+  if (t.kind==='set') return TypeInfo.set(promoteNumericToU64(t.elem));
+  if (t.kind==='map') return TypeInfo.map(promoteNumericToU64(t.key),promoteNumericToU64(t.value));
   return t;
 }
 
@@ -170,7 +184,12 @@ class Converter {
     this.topLevelDefs=this.collectTopLevelDefs();
     this.realVars=new Set(this.doubleNames);
     this.realSymbols=new Set();
+    this.realSymbolKeys=new Set();
+    this.u64Vars=new Set();
+    this.u64Symbols=new Set();
+    this.u64SymbolKeys=new Set();
     this.analyzeRealFlow();
+    this.analyzeU64Flow();
   }
 
   rootIdentifierNode(node) {
@@ -189,22 +208,40 @@ class Converter {
     return id?this.checker.getSymbolAtLocation(id):null;
   }
 
+  // TypeScript checker の Symbol オブジェクト同一性に依存しない安定キー。
+  // ローカルの TypeScript バージョン差があっても、同じ宣言なら同じキーになる。
+  symbolKey(sym) {
+    if (!sym) return null;
+    const ds=sym.declarations||[];
+    if (ds.length) {
+      const d=ds[0];
+      const sf=d.getSourceFile?.();
+      return `${sf?.fileName||''}:${d.pos}:${d.end}`;
+    }
+    return null;
+  }
+
   isRealIdentifier(node) {
     const id=this.rootIdentifierNode(node);
     if (!id) return false;
     if (this.doubleNames.has(id.text)) return true;
     const sym=this.checker.getSymbolAtLocation(id);
-    return !!sym && this.realSymbols.has(sym);
+    const key=this.symbolKey(sym);
+    if (sym && this.realSymbols.has(sym)) return true;
+    if (key && this.realSymbolKeys.has(key)) return true;
+    return !sym && this.realVars.has(id.text);
   }
 
   markReal(node) {
     const id=this.rootIdentifierNode(node);
     if (!id) return false;
     const sym=this.checker.getSymbolAtLocation(id);
+    const key=this.symbolKey(sym);
     if (sym) {
-      if (this.realSymbols.has(sym)) return false;
-      this.realSymbols.add(sym);
-      return true;
+      let changed=false;
+      if (!this.realSymbols.has(sym)) { this.realSymbols.add(sym); changed=true; }
+      if (key && !this.realSymbolKeys.has(key)) { this.realSymbolKeys.add(key); changed=true; }
+      return changed;
     }
     if (this.realVars.has(id.text)) return false;
     this.realVars.add(id.text);
@@ -229,7 +266,10 @@ class Converter {
     }
     if (ts.isCallExpression(node)) {
       if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(this.sf)==='Math') {
-        if (['floor','ceil','round','trunc','clz32'].includes(node.expression.name.text)) return false;
+        const name=node.expression.name.text;
+        if (['floor','ceil','round','trunc','clz32','sign'].includes(name)) return false;
+        if (name==='min'||name==='max') return node.arguments.some(a=>this.exprUsesReal(a));
+        return true;
       }
       return node.arguments.some(a=>this.exprUsesReal(a));
     }
@@ -271,6 +311,91 @@ class Converter {
     return real?promoteNumericToReal(t):t;
   }
 
+  isU64Identifier(node) {
+    const id=this.rootIdentifierNode(node);
+    if (!id) return false;
+    const sym=this.checker.getSymbolAtLocation(id);
+    const key=this.symbolKey(sym);
+    if (sym && this.u64Symbols.has(sym)) return true;
+    if (key && this.u64SymbolKeys.has(key)) return true;
+    return !sym && this.u64Vars.has(id.text);
+  }
+
+  markU64(node) {
+    const id=this.rootIdentifierNode(node);
+    if (!id) return false;
+    const sym=this.checker.getSymbolAtLocation(id);
+    const key=this.symbolKey(sym);
+    if (sym) {
+      let changed=false;
+      if (!this.u64Symbols.has(sym)) { this.u64Symbols.add(sym); changed=true; }
+      if (key && !this.u64SymbolKeys.has(key)) { this.u64SymbolKeys.add(key); changed=true; }
+      return changed;
+    }
+    if (this.u64Vars.has(id.text)) return false;
+    this.u64Vars.add(id.text);
+    return true;
+  }
+
+  isZobristObject(node) {
+    const id=this.rootIdentifierNode(node);
+    if (!id) return false;
+    const sym=this.checker.getSymbolAtLocation(id);
+    if (!sym) return false;
+    for (const d of sym.declarations||[]) {
+      if (ts.isVariableDeclaration(d) && d.initializer && ts.isNewExpression(d.initializer) && d.initializer.expression.getText(this.sf)==='ZobristHash') return true;
+    }
+    return false;
+  }
+
+  exprUsesU64(node) {
+    if (!node) return false;
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node)) return this.exprUsesU64(node.expression);
+    if (ts.isIdentifier(node) || ts.isElementAccessExpression(node) || ts.isPropertyAccessExpression(node)) {
+      if (this.isU64Identifier(node)) return true;
+      if (ts.isElementAccessExpression(node) || ts.isPropertyAccessExpression(node)) return this.exprUsesU64(node.expression);
+      return false;
+    }
+    if (ts.isBinaryExpression(node)) return this.exprUsesU64(node.left)||this.exprUsesU64(node.right);
+    if (ts.isConditionalExpression(node)) return this.exprUsesU64(node.whenTrue)||this.exprUsesU64(node.whenFalse);
+    if (ts.isCallExpression(node)) {
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        const name=node.expression.name.text;
+        const obj=node.expression.expression;
+        if (this.isZobristObject(obj) && ['value','changed','toggled'].includes(name)) return true;
+      }
+      return node.arguments.some(a=>this.exprUsesU64(a));
+    }
+    if (ts.isArrayLiteralExpression(node)) return node.elements.some(e=>this.exprUsesU64(e));
+    return false;
+  }
+
+  analyzeU64Flow() {
+    const assignOps=new Set([
+      ts.SyntaxKind.EqualsToken,ts.SyntaxKind.CaretEqualsToken,ts.SyntaxKind.BarEqualsToken,ts.SyntaxKind.AmpersandEqualsToken
+    ]);
+    for (let pass=0;pass<16;pass++) {
+      let changed=false;
+      const mark=(node)=>{ if(node && this.markU64(node)) changed=true; };
+      const visit=(n)=>{
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && this.exprUsesU64(n.initializer)) mark(n.name);
+        if (ts.isBinaryExpression(n) && assignOps.has(n.operatorToken.kind) && this.exprUsesU64(n.right)) mark(n.left);
+        if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text==='push') {
+          if (n.arguments.some(a=>this.exprUsesU64(a))) mark(n.expression.expression);
+        }
+        ts.forEachChild(n,visit);
+      };
+      const main=this.findMain();
+      if (main?.body) visit(main.body);
+      if (!changed) break;
+    }
+  }
+
+  applyU64Promotion(name,t,node=null) {
+    const isU64=node?this.isU64Identifier(node):this.u64Vars.has(name);
+    return isU64?promoteNumericToU64(t):t;
+  }
+
   collectTopLevelDefs() {
     const defs=new Map();
     for (const st of this.sf.statements) {
@@ -307,7 +432,7 @@ class Converter {
       'Math','Number','BigInt','String','Array','Set','Map','console','Infinity',
       'true','false','undefined','less','greater',
       // AHC runtime is provided natively on the C++ side.
-      'Timer','RNG','Annealing','seedFromClock'
+      'Timer','RNG','Annealing','MonteCarlo','BeamSearch','ZobristHash','seedFromClock'
     ]);
     const wanted=new Set();
     const q=[...this.identifiersIn(main.body)];
@@ -398,7 +523,10 @@ class Converter {
     if (ts.isBigIntLiteral(node)) return TypeInfo.number();
     if (node.kind===ts.SyntaxKind.TrueKeyword || node.kind===ts.SyntaxKind.FalseKeyword) return TypeInfo.bool();
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) return TypeInfo.string();
-    if (ts.isIdentifier(node)) return this.env.get(node.text) || TypeInfo.unknown();
+    if (ts.isIdentifier(node)) {
+      const t=this.env.get(node.text) || TypeInfo.unknown();
+      return this.isU64Identifier(node)?promoteNumericToU64(t):t;
+    }
     if (ts.isArrayLiteralExpression(node)) {
       const es=node.elements.map(x=>this.inferExpr(x));
       let e=TypeInfo.unknown();
@@ -439,7 +567,7 @@ class Converter {
       if (name==='Float32Array' || name==='Float64Array') return TypeInfo.vector(TypeInfo.real());
       if (['Int8Array','Int16Array','Int32Array','Uint8Array','Uint8ClampedArray','Uint16Array','Uint32Array','BigInt64Array','BigUint64Array'].includes(name)) return TypeInfo.vector(TypeInfo.number());
       if (name==='Array') return TypeInfo.vector(args.length?this.typeFromTypeNode(args[0]):TypeInfo.unknown());
-      if (name==='Timer'||name==='RNG'||name==='Annealing') return TypeInfo.custom(name);
+      if (name==='Timer'||name==='RNG'||name==='Annealing'||name==='ZobristHash') return TypeInfo.custom(name);
     }
     if (ts.isCallExpression(node)) {
       const callee=node.expression;
@@ -471,6 +599,9 @@ class Converter {
             if (name==='temperature') return TypeInfo.real();
             if (name==='acceptMax'||name==='acceptMin') return TypeInfo.bool();
           }
+          if (base.name==='ZobristHash') {
+            if (name==='value'||name==='changed'||name==='toggled') return TypeInfo.u64();
+          }
         }
         if (name==='map') {
           const fn=node.arguments[0];
@@ -480,13 +611,16 @@ class Converter {
               const elem=(base.kind==='vector'||base.kind==='array')?base.elem:TypeInfo.unknown();
               this.env.set(fn.parameters[0].name.text,elem);
             }
+            if (fn.parameters[1]?.name && ts.isIdentifier(fn.parameters[1].name)) {
+              this.env.set(fn.parameters[1].name.text,TypeInfo.number());
+            }
             const r=this.inferExpr(fn.body);
             this.env=saved;
             return TypeInfo.vector(r);
           }
           return TypeInfo.vector(TypeInfo.unknown());
         }
-        if (name==='filter'||name==='slice'||name==='reverse'||name==='sort') return base.kind==='array'?TypeInfo.vector(base.elem):base;
+        if (name==='filter'||name==='slice'||name==='reverse'||name==='sort'||name==='fill') return base.kind==='array'?TypeInfo.vector(base.elem):base;
         if (name==='pop'||name==='at') return (base.kind==='vector'||base.kind==='array')?base.elem:TypeInfo.unknown();
         if (name==='get' && base.kind==='map') return base.value;
         if (['has','includes'].includes(name)) return TypeInfo.bool();
@@ -499,7 +633,16 @@ class Converter {
         if (at.kind==='set') return TypeInfo.vector(at.elem);
         return at.kind==='vector'||at.kind==='array'?TypeInfo.vector(at.elem):TypeInfo.vector(TypeInfo.unknown());
       }
-      if (ts.isPropertyAccessExpression(callee) && callee.expression.getText(this.sf)==='Math') return TypeInfo.number();
+      if (ts.isPropertyAccessExpression(callee) && callee.expression.getText(this.sf)==='Math') {
+        const name=callee.name.text;
+        if (['floor','ceil','round','trunc','clz32','sign'].includes(name)) return TypeInfo.number();
+        if (name==='min'||name==='max') {
+          let t=TypeInfo.unknown();
+          for (const a of node.arguments) t=mergeType(t,this.inferExpr(a));
+          return t.kind==='unknown'?TypeInfo.number():t;
+        }
+        return TypeInfo.real();
+      }
     }
     return TypeInfo.unknown();
   }
@@ -616,6 +759,13 @@ class Converter {
     if (ts.isArrayLiteralExpression(node)) {
       const t=this.inferExpr(node);
       const size=node.elements.length;
+      // A TS array literal passed where vector<T> is expected must remain a growable vector.
+      // In particular [], used in push([]) for number[][], must not become array<auto,0>.
+      if (expected.kind==='vector') {
+        const elem=expected.elem||TypeInfo.unknown();
+        const e=node.elements.map(x=>this.emitExpr(x,elem)).join(',');
+        return `vector<${typeToCpp(elem)}>{${e}}`;
+      }
       if (expected.kind==='tuple' || t.kind==='tuple') {
         const tt=expected.kind==='tuple'?expected:t;
         const e=node.elements.map((x,i)=>this.emitExpr(x,tt.elems[i]||TypeInfo.unknown())).join(',');
@@ -851,7 +1001,13 @@ class Converter {
         return `MonteCarlo::${name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
       }
 
+      // Generic Beam Search is implemented natively by the C++ AHC template.
+      if (objNode.getText(this.sf)==='BeamSearch' && ['max','min','maxUntil','minUntil'].includes(name)) {
+        return `BeamSearch::${name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
+      }
+
       if (name==='push') { const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.unknown(); return `${obj}.push_back(${args.map(x=>this.emitExpr(x,et)).join(',')})`; }
+      if (name==='fill') { const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.unknown(); const v=args[0]?this.emitExpr(args[0],et):'0'; return `(fill(${obj}.begin(),${obj}.end(),${v}),${obj})`; }
       if (name==='pop') return `${obj}.back()`; // statement emitter adds pop_back when value unused
       if (name==='at' && args.length===1 && ts.isPrefixUnaryExpression(args[0]) && args[0].operator===ts.SyntaxKind.MinusToken && ts.isNumericLiteral(args[0].operand) && args[0].operand.text==='1') return `${obj}.back()`;
       if (name==='has') return `${obj}.count(${this.emitExpr(args[0])})`;
@@ -927,7 +1083,8 @@ class Converter {
     const baseT=this.inferExpr(objNode);
     const elem=(baseT.kind==='vector'||baseT.kind==='array')?baseT.elem:TypeInfo.unknown();
     const p=fn.parameters[0].name.text;
-    const saved=new Map(this.env); this.env.set(p,elem);
+    const indexName=fn.parameters[1] && ts.isIdentifier(fn.parameters[1].name) ? fn.parameters[1].name.text : null;
+    const saved=new Map(this.env); this.env.set(p,elem); if(indexName) this.env.set(indexName,TypeInfo.number());
     let ret=TypeInfo.unknown(), bodyExpr=null;
     if (ts.isExpression(fn.body)) { ret=this.inferExpr(fn.body); bodyExpr=this.emitExpr(fn.body); }
     this.env=saved;
@@ -936,6 +1093,7 @@ class Converter {
       return node.getText(this.sf);
     }
     const rt=ret.kind==='unknown'?TypeInfo.number():ret;
+    if(indexName) return `([&](){ vector<${typeToCpp(rt)}> _r; _r.reserve(${obj}.size()); ll ${indexName}=0; for(auto ${p}:${obj}){ _r.push_back(${bodyExpr}); ++${indexName}; } return _r; }())`;
     return `([&](){ vector<${typeToCpp(rt)}> _r; _r.reserve(${obj}.size()); for(auto ${p}:${obj}) _r.push_back(${bodyExpr}); return _r; }())`;
   }
 
@@ -1015,6 +1173,7 @@ class Converter {
       const st=this.isCall(init,'nexts')?TypeInfo.string():TypeInfo.number();
       let t=annotated.kind==='unknown'?TypeInfo.vector(st):annotated;
       t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
       this.env.set(name,t);
       const n=init.arguments[0]?this.emitExpr(init.arguments[0]):'0';
       return `${typeToCpp(t)} ${name}(${n}); for(auto &x:${name}) cin>>x;`;
@@ -1026,6 +1185,7 @@ class Converter {
     if (ts.isArrayLiteralExpression(init) && init.elements.length===0) {
       let t=annotated.kind==='unknown'?TypeInfo.vector(TypeInfo.number()):annotated;
       t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
       const w=this.tupleWidths.get(name);
       if (w && t.kind==='vector' && t.elem?.kind==='vector') t=TypeInfo.vector(TypeInfo.array(t.elem.elem,w));
       this.env.set(name,t); return `${typeToCpp(t)} ${name};`;
@@ -1036,6 +1196,7 @@ class Converter {
     if (fac) {
       let t=annotated.kind==='unknown'?fac.type:annotated;
       t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
       this.env.set(name,t);
       // Re-emit the factory with the promoted expected type so fill(0) becomes vector<double>, etc.
       const promotedFac=this.emitArrayFactory(init,t) || fac;
@@ -1058,6 +1219,7 @@ class Converter {
       // Top-level [1,2,3] is usually a mutable TS array => vector; nested tuples remain array.
       if (annotated.kind==='unknown') t=TypeInfo.vector(inferred.elem);
       t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
       this.env.set(name,t);
       const body=init.elements.map(e => {
         if (ts.isArrayLiteralExpression(e)) {
@@ -1074,6 +1236,7 @@ class Converter {
     if (ts.isNewExpression(init)) {
       let t=annotated.kind==='unknown'?this.inferExpr(init):annotated;
       t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
       this.env.set(name,t);
       return `${typeToCpp(t)} ${name}=${this.emitExpr(init,t)};`;
     }
@@ -1086,6 +1249,7 @@ class Converter {
 
     let t=annotated.kind==='unknown'?this.inferExpr(init):annotated;
     t=this.applyRealPromotion(name,t,decl.name);
+      t=this.applyU64Promotion(name,t,decl.name);
     if (t.kind==='unknown') {
       // auto is valid for most non-empty expressions and much safer than guessing ll.
       this.env.set(name,t);
@@ -1373,7 +1537,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v16',
+      '// Generated by ts_main_to_cpp_v21',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',

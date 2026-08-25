@@ -236,6 +236,204 @@ struct Annealing{
 };
 
 // ================================================================
+// Monte Carlo
+// ================================================================
+// 複数候補を同じランダム未来で何度も評価し、平均値で比較する。
+// AHC で「候補手ごとに未来をプレイアウトして期待値最大を選ぶ」用途向け。
+//
+// chooseMax / chooseMin
+//   固定 sample 数で比較する。
+//
+// chooseMaxUntil / chooseMinUntil
+//   timeLimit 秒まで比較する。
+//
+// 1 sample ごとに makeScenario(rng) を1回だけ呼び、
+// 同じ scenario を全候補へ渡すことで候補比較の乱数ノイズを減らす。
+//
+// Common Random Numbers を維持したい場合、rollout 内では乱数を生成せず、
+// 必要な乱数は makeScenario 側でまとめて生成する。
+// scenario は全候補で共有するため rollout 内で変更しないこと。
+template<class Candidate>
+struct MonteCarloResult{
+  Candidate best;
+  int bestIndex=0;
+  long long samples=0;
+  vector<double> sum;
+  vector<double> mean;
+};
+
+struct MonteCarlo{
+
+private:
+
+  template<class Candidate>
+  static MonteCarloResult<Candidate> buildResult(
+    const vector<Candidate>& candidates,
+    vector<double> sum,
+    long long samples,
+    bool maximize
+  ){
+    assert(!candidates.empty());
+
+    int bestIndex=0;
+    for(int i=1;i<(int)candidates.size();i++){
+      if(maximize ? sum[i]>sum[bestIndex] : sum[i]<sum[bestIndex]){
+        bestIndex=i;
+      }
+    }
+
+    vector<double> mean(sum.size(),0.0);
+    if(samples>0){
+      for(int i=0;i<(int)sum.size();i++){
+        mean[i]=sum[i]/samples;
+      }
+    }
+
+    return {
+      candidates[bestIndex],
+      bestIndex,
+      samples,
+      move(sum),
+      move(mean)
+    };
+  }
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> runFixed(
+    const vector<Candidate>& candidates,
+    long long samples,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout,
+    bool maximize
+  ){
+    assert(!candidates.empty());
+    assert(samples>0);
+
+    vector<double> sum(candidates.size(),0.0);
+
+    for(long long sample=0;sample<samples;sample++){
+      auto scenario=makeScenario(rng);
+
+      for(int i=0;i<(int)candidates.size();i++){
+        sum[i]+=(double)rollout(candidates[i],scenario);
+      }
+    }
+
+    return buildResult(
+      candidates,move(sum),samples,maximize
+    );
+  }
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> runUntil(
+    const vector<Candidate>& candidates,
+    Timer& timer,
+    double timeLimit,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout,
+    bool maximize,
+    long long minSamples,
+    long long checkInterval
+  ){
+    assert(!candidates.empty());
+
+    minSamples=max(0LL,minSamples);
+    checkInterval=max(1LL,checkInterval);
+
+    vector<double> sum(candidates.size(),0.0);
+    long long samples=0;
+
+    while(true){
+      if(
+        samples>=minSamples
+        && samples%checkInterval==0
+        && timer.over(timeLimit)
+      ) break;
+
+      auto scenario=makeScenario(rng);
+
+      for(int i=0;i<(int)candidates.size();i++){
+        sum[i]+=(double)rollout(candidates[i],scenario);
+      }
+
+      samples++;
+    }
+
+    return buildResult(
+      candidates,move(sum),samples,maximize
+    );
+  }
+
+public:
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> chooseMax(
+    const vector<Candidate>& candidates,
+    long long samples,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout
+  ){
+    return runFixed(
+      candidates,samples,rng,
+      makeScenario,rollout,true
+    );
+  }
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> chooseMin(
+    const vector<Candidate>& candidates,
+    long long samples,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout
+  ){
+    return runFixed(
+      candidates,samples,rng,
+      makeScenario,rollout,false
+    );
+  }
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> chooseMaxUntil(
+    const vector<Candidate>& candidates,
+    Timer& timer,
+    double timeLimit,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout,
+    long long minSamples=1,
+    long long checkInterval=1
+  ){
+    return runUntil(
+      candidates,timer,timeLimit,rng,
+      makeScenario,rollout,true,
+      minSamples,checkInterval
+    );
+  }
+
+  template<class Candidate,class MakeScenario,class Rollout>
+  static MonteCarloResult<Candidate> chooseMinUntil(
+    const vector<Candidate>& candidates,
+    Timer& timer,
+    double timeLimit,
+    RNG& rng,
+    MakeScenario makeScenario,
+    Rollout rollout,
+    long long minSamples=1,
+    long long checkInterval=1
+  ){
+    return runUntil(
+      candidates,timer,timeLimit,rng,
+      makeScenario,rollout,false,
+      minSamples,checkInterval
+    );
+  }
+};
+
+// ================================================================
 // Grid Utility
 // ================================================================
 struct Pos{
@@ -1028,7 +1226,63 @@ State answer=result.bestState;
 ・ビームの重複除去には Zobrist Hash
 ・score の再計算が重い場合は必ず差分評価
 
+
+------------------------------------------------------------------
+7. モンテカルロ法
+------------------------------------------------------------------
+
+vector<int> candidates={0,1,2,3};
+RNG rng(123456789ULL);
+
+// 1 sample 分の未来を生成する。
+// 同じ scenario が全候補へ渡される。
+struct Scenario{
+  vector<int> randomEvents;
+};
+
+auto result=MonteCarlo::chooseMax(
+  candidates,
+  64,
+  rng,
+
+  [&](RNG& rng){
+    Scenario sc;
+    sc.randomEvents.resize(100);
+
+    for(int& x:sc.randomEvents){
+      x=rng.nextInt(100);
+    }
+
+    return sc;
+  },
+
+  [&](int candidate,const Scenario& sc){
+    // candidate を選んだ後の未来を sc に従ってシミュレーションする。
+    return rollout(candidate,sc);
+  }
+);
+
+int bestAction=result.best;
+
+// 制限時間まで回す場合。
+Timer timer;
+
+auto timedResult=MonteCarlo::chooseMaxUntil(
+  candidates,
+  timer,
+  1.85,
+  rng,
+  makeScenario,
+  rollout,
+  8, // 最低 sample 数
+  1  // 時間確認間隔
+);
+
+// 最小化問題では chooseMin / chooseMinUntil を使う。
 */
+
+
+  template<class T> vector<T> vec_slice(const vector<T>& a,ll l,ll r){ l=max<ll>(0,l); r=min<ll>(a.size(),r); if(l>r)l=r; return vector<T>(a.begin()+l,a.begin()+r); }
 
 int main(){
   ios::sync_with_stdio(false);

@@ -10406,6 +10406,248 @@ class Annealing {
   }
 }
 
+/**
+ * 説明:
+ *   モンテカルロ法で複数候補を比較した結果。
+ *   best は最良候補、bestIndex は candidates 内の位置。
+ *   samples は実際に試したシナリオ数。
+ *   sum/mean には各候補の評価値合計・平均を保存する。
+ */
+type MonteCarloResult<C> = {
+  best: C,
+  bestIndex: number,
+  samples: number,
+  sum: number[],
+  mean: number[]
+};
+
+/**
+ * 説明:
+ *   AHC用のモンテカルロ候補比較。
+ *   候補ごとに未来を何度もプレイアウトし、平均評価値が最良の候補を返す。
+ *
+ *   1サンプルごとに makeScenario(rng) を1回だけ呼び、
+ *   生成した同じ scenario を全候補の rollout に渡す。
+ *   これにより候補ごとに別々の乱数を使うより比較時のノイズを抑えやすい。
+ *
+ * 使い方:
+ *   let result = MonteCarlo.chooseMax(
+ *     candidates,
+ *     64,
+ *     rng,
+ *     (rng) => makeScenario(rng),
+ *     (candidate,scenario) => rollout(candidate,scenario)
+ *   );
+ *   let best = result.best;
+ *
+ * 注意:
+ *   Common Random Numbers を維持したい場合、
+ *   rollout 内では追加の乱数を生成せず、
+ *   必要な乱数は makeScenario 側でまとめて生成する。
+ *   scenario は全候補で共有するため、rollout 内で変更しない。
+ * 
+ * 用例: AHC015
+ */
+class MonteCarlo {
+
+  /**
+   * 説明: 固定回数プレイアウトし、平均評価値が最大の候補を返す。
+   * 使い方: let result = MonteCarlo.chooseMax(candidates,64,rng,makeScenario,rollout)
+   * 計算量: O(samples * candidates.length * rollout)
+   */
+  static chooseMax<C,S>(
+    candidates: C[],
+    samples: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number
+  ): MonteCarloResult<C> {
+    return MonteCarlo.runFixed(
+      candidates,samples,rng,makeScenario,rollout,true
+    );
+  }
+
+  /**
+   * 説明: 固定回数プレイアウトし、平均評価値が最小の候補を返す。
+   * 使い方: let result = MonteCarlo.chooseMin(candidates,64,rng,makeScenario,rollout)
+   * 計算量: O(samples * candidates.length * rollout)
+   */
+  static chooseMin<C,S>(
+    candidates: C[],
+    samples: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number
+  ): MonteCarloResult<C> {
+    return MonteCarlo.runFixed(
+      candidates,samples,rng,makeScenario,rollout,false
+    );
+  }
+
+  /**
+   * 説明:
+   *   timeLimit 秒までプレイアウトし、平均評価値が最大の候補を返す。
+   *   minSamples 回までは時間超過後でも必ず実行する。
+   *   checkInterval サンプルごとに時間を確認する。
+   *
+   * 使い方:
+   *   let result = MonteCarlo.chooseMaxUntil(
+   *     candidates,timer,1.9,rng,makeScenario,rollout,8,4
+   *   )
+   *
+   * 計算量: 制限時間内で実行できる回数に依存
+   */
+  static chooseMaxUntil<C,S>(
+    candidates: C[],
+    timer: Timer,
+    timeLimit: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number,
+    minSamples = 1,
+    checkInterval = 1
+  ): MonteCarloResult<C> {
+    return MonteCarlo.runUntil(
+      candidates,timer,timeLimit,rng,
+      makeScenario,rollout,true,
+      minSamples,checkInterval
+    );
+  }
+
+  /**
+   * 説明:
+   *   timeLimit 秒までプレイアウトし、平均評価値が最小の候補を返す。
+   *   minSamples 回までは時間超過後でも必ず実行する。
+   *   checkInterval サンプルごとに時間を確認する。
+   *
+   * 使い方:
+   *   let result = MonteCarlo.chooseMinUntil(
+   *     candidates,timer,1.9,rng,makeScenario,rollout,8,4
+   *   )
+   *
+   * 計算量: 制限時間内で実行できる回数に依存
+   */
+  static chooseMinUntil<C,S>(
+    candidates: C[],
+    timer: Timer,
+    timeLimit: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number,
+    minSamples = 1,
+    checkInterval = 1
+  ): MonteCarloResult<C> {
+    return MonteCarlo.runUntil(
+      candidates,timer,timeLimit,rng,
+      makeScenario,rollout,false,
+      minSamples,checkInterval
+    );
+  }
+
+  private static runFixed<C,S>(
+    candidates: C[],
+    samples: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number,
+    maximize: boolean
+  ): MonteCarloResult<C> {
+    if (candidates.length == 0) {
+      throw new Error("MonteCarlo: candidates must not be empty");
+    }
+    if (samples <= 0) {
+      throw new Error("MonteCarlo: samples must be positive");
+    }
+
+    let sum = Array(candidates.length).fill(0);
+
+    for (let sample = 0; sample < samples; sample++) {
+      let scenario = makeScenario(rng);
+      for (let i = 0; i < candidates.length; i++) {
+        sum[i] += rollout(candidates[i],scenario);
+      }
+    }
+
+    return MonteCarlo.buildResult(
+      candidates,sum,samples,maximize
+    );
+  }
+
+  private static runUntil<C,S>(
+    candidates: C[],
+    timer: Timer,
+    timeLimit: number,
+    rng: RNG,
+    makeScenario: (rng: RNG) => S,
+    rollout: (candidate: C, scenario: S) => number,
+    maximize: boolean,
+    minSamples: number,
+    checkInterval: number
+  ): MonteCarloResult<C> {
+    if (candidates.length == 0) {
+      throw new Error("MonteCarlo: candidates must not be empty");
+    }
+
+    minSamples = Math.max(0,minSamples);
+    checkInterval = Math.max(1,checkInterval);
+
+    let sum = Array(candidates.length).fill(0);
+    let samples = 0;
+
+    while (true) {
+      if (
+        samples >= minSamples
+        && samples%checkInterval == 0
+        && timer.over(timeLimit)
+      ) break;
+
+      let scenario = makeScenario(rng);
+      for (let i = 0; i < candidates.length; i++) {
+        sum[i] += rollout(candidates[i],scenario);
+      }
+      samples++;
+    }
+
+    return MonteCarlo.buildResult(
+      candidates,sum,samples,maximize
+    );
+  }
+
+  private static buildResult<C>(
+    candidates: C[],
+    sum: number[],
+    samples: number,
+    maximize: boolean
+  ): MonteCarloResult<C> {
+    let bestIndex = 0;
+
+    for (let i = 1; i < candidates.length; i++) {
+      if (
+        maximize
+          ? sum[i] > sum[bestIndex]
+          : sum[i] < sum[bestIndex]
+      ) {
+        bestIndex = i;
+      }
+    }
+
+    let mean = Array(sum.length).fill(0);
+    if (samples > 0) {
+      for (let i = 0; i < sum.length; i++) {
+        mean[i] = sum[i]/samples;
+      }
+    }
+
+    return {
+      best: candidates[bestIndex],
+      bestIndex,
+      samples,
+      sum,
+      mean
+    };
+  }
+}
+
 // end
 
 function readInput() {

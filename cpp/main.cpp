@@ -1282,8 +1282,6 @@ auto timedResult=MonteCarlo::chooseMaxUntil(
 */
 
 
-  template<class T> vector<T> vec_slice(const vector<T>& a,ll l,ll r){ l=max<ll>(0,l); r=min<ll>(a.size(),r); if(l>r)l=r; return vector<T>(a.begin()+l,a.begin()+r); }
-
 int main(){
   ios::sync_with_stdio(false);
   cin.tie(nullptr);

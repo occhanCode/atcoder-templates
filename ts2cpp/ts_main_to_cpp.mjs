@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v14.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v14.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v14.mjs > main.cpp
+ *   node ts_main_to_cpp_v15.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v15.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v15.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     else if (a==='--cpp-template') r.cppTemplate=argv[++i];
     else if (a==='--deps') r.deps=true;
     else if (a==='--no-deps') r.deps=false;
-    else if (a==='--version') { console.log('ts_main_to_cpp_v14 14.0.0'); process.exit(0); }
+    else if (a==='--version') { console.log('ts_main_to_cpp_v15 15.0.0'); process.exit(0); }
     else if (a==='--double') {
       const v=argv[++i]; if (!v) throw new Error('--double requires a variable name or comma-separated names');
       r.doubleNames.push(...v.split(',').map(x=>x.trim()).filter(Boolean));
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v14.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v15.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -832,6 +832,12 @@ class Converter {
         return `${mp[name]||name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
       }
       if (objNode.getText(this.sf)==='String' && name==='fromCharCode') return `char(${this.emitExpr(args[0])})`;
+
+      // TypeScript の static class method は C++ では :: で呼ぶ。
+      // AHC 共通ライブラリの MonteCarlo は TS/C++ で同名 API を持つ。
+      if (objNode.getText(this.sf)==='MonteCarlo' && ['chooseMax','chooseMin','chooseMaxUntil','chooseMinUntil'].includes(name)) {
+        return `MonteCarlo::${name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
+      }
 
       if (name==='push') { const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.unknown(); return `${obj}.push_back(${args.map(x=>this.emitExpr(x,et)).join(',')})`; }
       if (name==='pop') return `${obj}.back()`; // statement emitter adds pop_back when value unused

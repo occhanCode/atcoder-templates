@@ -1020,6 +1020,386 @@ struct BeamSearch{
 };
 
 // ================================================================
+// Large Neighborhood Search (LNS)
+// ================================================================
+// TypeScript版の
+//   lnsMinimize / lnsMaximize
+//   lnsMinimizeUntil / lnsMaximizeUntil
+// と同じAPIを持つC++版。
+//
+// 前提:
+//   Timer, RNG がこの定義より前に存在すること。
+//
+// destroy(State&,RNG&) -> Removed
+// repair(State&,Removed&,RNG&) -> void
+// evaluate(const State&) -> Score
+// cloneState(const State&) -> State
+//
+// State が巨大でコピーが重い場合は、問題専用の apply / rollback 型へ。
+// ================================================================
+
+template<class State,class Score>
+struct LNSResult{
+  State bestState;
+  Score bestScore;
+  State currentState;
+  Score currentScore;
+  long long iterations=0;
+  long long accepted=0;
+  long long improved=0;
+};
+
+struct LNSAcceptImproveMin{
+  template<class Score>
+  bool operator()(
+    const Score& currentScore,
+    const Score& nextScore,
+    const Score& bestScore,
+    double progress,
+    RNG& rng
+  ) const{
+    return nextScore<currentScore;
+  }
+};
+
+struct LNSAcceptImproveMax{
+  template<class Score>
+  bool operator()(
+    const Score& currentScore,
+    const Score& nextScore,
+    const Score& bestScore,
+    double progress,
+    RNG& rng
+  ) const{
+    return nextScore>currentScore;
+  }
+};
+
+struct LNSRRTMin{
+  double startThreshold;
+  double endThreshold;
+
+  template<class Score>
+  bool operator()(
+    const Score& currentScore,
+    const Score& nextScore,
+    const Score& bestScore,
+    double progress,
+    RNG& rng
+  ) const{
+    double threshold=
+      startThreshold+(endThreshold-startThreshold)*progress;
+    return (double)nextScore<=(double)bestScore+threshold;
+  }
+};
+
+struct LNSRRTMax{
+  double startThreshold;
+  double endThreshold;
+
+  template<class Score>
+  bool operator()(
+    const Score& currentScore,
+    const Score& nextScore,
+    const Score& bestScore,
+    double progress,
+    RNG& rng
+  ) const{
+    double threshold=
+      startThreshold+(endThreshold-startThreshold)*progress;
+    return (double)nextScore>=(double)bestScore-threshold;
+  }
+};
+
+inline LNSRRTMin makeLnsRRTMin(
+  double startThreshold,
+  double endThreshold
+){
+  return {startThreshold,endThreshold};
+}
+
+inline LNSRRTMax makeLnsRRTMax(
+  double startThreshold,
+  double endThreshold
+){
+  return {startThreshold,endThreshold};
+}
+
+template<
+  class State,
+  class CloneState,
+  class Evaluate,
+  class Destroy,
+  class Repair,
+  class Accept=LNSAcceptImproveMin
+>
+auto lnsMinimize(
+  const State& initialState,
+  long long iterations,
+  RNG& rng,
+  CloneState cloneState,
+  Evaluate evaluate,
+  Destroy destroy,
+  Repair repair,
+  Accept accept={}
+){
+  using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+
+  State currentState=cloneState(initialState);
+  Score currentScore=evaluate(currentState);
+
+  State bestState=cloneState(currentState);
+  Score bestScore=currentScore;
+
+  long long accepted=0;
+  long long improved=0;
+
+  for(long long iter=0;iter<iterations;iter++){
+    State nextState=cloneState(currentState);
+
+    auto removed=destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    Score nextScore=evaluate(nextState);
+    double progress=
+      iterations<=1 ? 1.0 : (double)iter/(double)(iterations-1);
+
+    if(nextScore<bestScore){
+      bestState=cloneState(nextState);
+      bestScore=nextScore;
+      improved++;
+    }
+
+    if(accept(currentScore,nextScore,bestScore,progress,rng)){
+      currentState=move(nextState);
+      currentScore=nextScore;
+      accepted++;
+    }
+  }
+
+  return LNSResult<State,Score>{
+    move(bestState),
+    bestScore,
+    move(currentState),
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+template<
+  class State,
+  class CloneState,
+  class Evaluate,
+  class Destroy,
+  class Repair,
+  class Accept=LNSAcceptImproveMax
+>
+auto lnsMaximize(
+  const State& initialState,
+  long long iterations,
+  RNG& rng,
+  CloneState cloneState,
+  Evaluate evaluate,
+  Destroy destroy,
+  Repair repair,
+  Accept accept={}
+){
+  using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+
+  State currentState=cloneState(initialState);
+  Score currentScore=evaluate(currentState);
+
+  State bestState=cloneState(currentState);
+  Score bestScore=currentScore;
+
+  long long accepted=0;
+  long long improved=0;
+
+  for(long long iter=0;iter<iterations;iter++){
+    State nextState=cloneState(currentState);
+
+    auto removed=destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    Score nextScore=evaluate(nextState);
+    double progress=
+      iterations<=1 ? 1.0 : (double)iter/(double)(iterations-1);
+
+    if(bestScore<nextScore){
+      bestState=cloneState(nextState);
+      bestScore=nextScore;
+      improved++;
+    }
+
+    if(accept(currentScore,nextScore,bestScore,progress,rng)){
+      currentState=move(nextState);
+      currentScore=nextScore;
+      accepted++;
+    }
+  }
+
+  return LNSResult<State,Score>{
+    move(bestState),
+    bestScore,
+    move(currentState),
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+template<
+  class State,
+  class CloneState,
+  class Evaluate,
+  class Destroy,
+  class Repair,
+  class Accept=LNSAcceptImproveMin
+>
+auto lnsMinimizeUntil(
+  const State& initialState,
+  Timer& timer,
+  double timeLimit,
+  RNG& rng,
+  CloneState cloneState,
+  Evaluate evaluate,
+  Destroy destroy,
+  Repair repair,
+  Accept accept={},
+  long long checkInterval=1
+){
+  using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+
+  State currentState=cloneState(initialState);
+  Score currentScore=evaluate(currentState);
+
+  State bestState=cloneState(currentState);
+  Score bestScore=currentScore;
+
+  long long iterations=0;
+  long long accepted=0;
+  long long improved=0;
+
+  checkInterval=max(1LL,checkInterval);
+
+  while(true){
+    if(
+      iterations%checkInterval==0
+      && timer.over(timeLimit)
+    ) break;
+
+    State nextState=cloneState(currentState);
+
+    auto removed=destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    Score nextScore=evaluate(nextState);
+    double progress=timer.progress(timeLimit);
+
+    if(nextScore<bestScore){
+      bestState=cloneState(nextState);
+      bestScore=nextScore;
+      improved++;
+    }
+
+    if(accept(currentScore,nextScore,bestScore,progress,rng)){
+      currentState=move(nextState);
+      currentScore=nextScore;
+      accepted++;
+    }
+
+    iterations++;
+  }
+
+  return LNSResult<State,Score>{
+    move(bestState),
+    bestScore,
+    move(currentState),
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+template<
+  class State,
+  class CloneState,
+  class Evaluate,
+  class Destroy,
+  class Repair,
+  class Accept=LNSAcceptImproveMax
+>
+auto lnsMaximizeUntil(
+  const State& initialState,
+  Timer& timer,
+  double timeLimit,
+  RNG& rng,
+  CloneState cloneState,
+  Evaluate evaluate,
+  Destroy destroy,
+  Repair repair,
+  Accept accept={},
+  long long checkInterval=1
+){
+  using Score=decay_t<invoke_result_t<Evaluate,const State&>>;
+
+  State currentState=cloneState(initialState);
+  Score currentScore=evaluate(currentState);
+
+  State bestState=cloneState(currentState);
+  Score bestScore=currentScore;
+
+  long long iterations=0;
+  long long accepted=0;
+  long long improved=0;
+
+  checkInterval=max(1LL,checkInterval);
+
+  while(true){
+    if(
+      iterations%checkInterval==0
+      && timer.over(timeLimit)
+    ) break;
+
+    State nextState=cloneState(currentState);
+
+    auto removed=destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    Score nextScore=evaluate(nextState);
+    double progress=timer.progress(timeLimit);
+
+    if(bestScore<nextScore){
+      bestState=cloneState(nextState);
+      bestScore=nextScore;
+      improved++;
+    }
+
+    if(accept(currentScore,nextScore,bestScore,progress,rng)){
+      currentState=move(nextState);
+      currentScore=nextScore;
+      accepted++;
+    }
+
+    iterations++;
+  }
+
+  return LNSResult<State,Score>{
+    move(bestState),
+    bestScore,
+    move(currentState),
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+// ================================================================
 // Multi Start
 // ================================================================
 // 複数の初期解から独立に探索するための汎用骨格。
@@ -1364,6 +1744,185 @@ auto timedResult=MonteCarlo::chooseMaxUntil(
 );
 
 // 最小化問題では chooseMin / chooseMinUntil を使う。
+
+------------------------------------------------------------------
+8. Large Neighborhood Search (LNS)
+------------------------------------------------------------------
+
+// 解の一部を大きく壊して (destroy)、
+// 問題固有の方法で作り直す (repair) 探索。
+//
+// 例:
+//   ・配送順の一部を削除して再挿入
+//   ・盤面の一部を消して貪欲で再構築
+//   ・複数要素を外して DP / Beam Search で repair
+//
+// destroy / repair は問題固有。
+// LNS側は current / best の管理と採用判定を行う。
+
+struct State{
+  vector<int> order;
+};
+
+// 小さいほど良い評価値の例。
+auto evaluate=[&](const State& state)->ll{
+  ll score=0;
+
+  for(int i=1;i<(int)state.order.size();i++){
+    score+=abs(state.order[i]-state.order[i-1]);
+  }
+
+  return score;
+};
+
+State initialState=...;
+
+Timer timer;
+RNG rng(123456789ULL);
+
+auto result=lnsMinimizeUntil(
+  initialState,
+  timer,
+  1.85,
+  rng,
+
+  // currentState から nextState を作る。
+  [&](const State& state){
+    return state;
+  },
+
+  // 評価値。最小化なら小さいほど良い。
+  evaluate,
+
+  // destroy:
+  // nextState を直接変更し、
+  // repair に必要な情報を return する。
+  [&](State& state,RNG& rng){
+    vector<int> removed;
+
+    int len=min(10,(int)state.order.size());
+    int left=rng.nextInt((int)state.order.size()-len+1);
+
+    for(int i=0;i<len;i++){
+      removed.push_back(state.order[left+i]);
+    }
+
+    state.order.erase(
+      state.order.begin()+left,
+      state.order.begin()+left+len
+    );
+
+    return removed;
+  },
+
+  // repair:
+  // destroy で削除した要素を再び state に戻す。
+  [&](State& state,vector<int>& removed,RNG& rng){
+    rng.shuffle(removed.begin(),removed.end());
+
+    for(int x:removed){
+      // 例として全挿入位置を試し、
+      // 最も評価値が良い場所へ挿入する。
+      int bestPos=0;
+      ll bestScore=LINF;
+
+      for(int pos=0;pos<=(int)state.order.size();pos++){
+        state.order.insert(state.order.begin()+pos,x);
+
+        ll score=evaluate(state);
+        if(score<bestScore){
+          bestScore=score;
+          bestPos=pos;
+        }
+
+        state.order.erase(state.order.begin()+pos);
+      }
+
+      state.order.insert(state.order.begin()+bestPos,x);
+    }
+  }
+);
+
+State answer=result.bestState;
+ll bestScore=result.bestScore;
+
+// 探索統計。
+// result.iterations : 試した近傍数
+// result.accepted   : 採用した回数
+// result.improved   : best を更新した回数
+DBG(result.iterations,result.accepted,result.improved,bestScore);
+
+
+------------------------------------------------------------------
+9. RRT-LNS
+------------------------------------------------------------------
+
+// 通常のLNSは改善解だけ採用する。
+//
+//   nextScore < currentScore
+//
+// Record-to-Record Travel (RRT) では、
+// bestScore から threshold 以内なら多少悪い解も採用する。
+//
+// 序盤:
+//   nextScore <= bestScore + 20
+//
+// 終盤:
+//   threshold が 0 に近づく
+//
+// とすることで、局所最適から抜けやすくする。
+
+auto result=lnsMinimizeUntil(
+  initialState,
+  timer,
+  1.85,
+  rng,
+  cloneState,
+  evaluate,
+  destroy,
+  repair,
+
+  // threshold を 20 -> 0 に線形減少。
+  makeLnsRRTMin(20.0,0.0)
+);
+
+State answer=result.bestState;
+
+
+------------------------------------------------------------------
+10. 最大化LNS
+------------------------------------------------------------------
+
+// 大きいほど良い評価値なら lnsMaximizeUntil を使う。
+
+auto result=lnsMaximizeUntil(
+  initialState,
+  timer,
+  1.85,
+  rng,
+  cloneState,
+  evaluate,
+  destroy,
+  repair
+);
+
+State answer=result.bestState;
+
+
+// 最大化問題のRRTならこちら。
+// bestScore - threshold まで悪化を許容する。
+
+auto resultRRT=lnsMaximizeUntil(
+  initialState,
+  timer,
+  1.85,
+  rng,
+  cloneState,
+  evaluate,
+  destroy,
+  repair,
+  makeLnsRRTMax(100.0,0.0)
+);
 */
 
 

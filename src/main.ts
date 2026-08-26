@@ -10936,6 +10936,349 @@ class BeamSearch {
   }
 }
 
+// ================================================================
+// Large Neighborhood Search (LNS)
+// ================================================================
+// 解の一部を大きく壊し (destroy)、問題固有の方法で作り直す (repair)
+// ことを繰り返す汎用探索。
+//
+// ライブラリ側:
+//   ・現在解 / 最良解の管理
+//   ・反復回数、採用回数の管理
+//   ・固定回数 / 制限時間での停止
+//   ・採用規則の差し替え
+//
+// 問題側:
+//   ・cloneState(state)
+//   ・evaluate(state)
+//   ・destroy(state,rng) -> removed
+//   ・repair(state,removed,rng)
+//
+// destroy / repair は state を直接変更する。
+// 各反復では currentState を clone した nextState に対して実行するので、
+// 不採用時の rollback は不要。
+//
+// minimize / maximize:
+//   固定 iteration 回だけ探索する。
+// minimizeUntil / maximizeUntil:
+//   timeLimit 秒まで探索する。
+//
+// 採用規則:
+//   lnsAcceptImproveMin / lnsAcceptImproveMax
+//     改善解だけ採用する通常のLNS。
+//   makeLnsRRTMin / makeLnsRRTMax
+//     best から threshold 以内の悪化も許す Record-to-Record Travel。
+//
+// 計算量:
+//   1反復あたり
+//     O(cloneState + destroy + repair + evaluate)
+//   全体はそれに反復回数を掛けたもの。
+//
+// 注意:
+//   State が巨大で clone がボトルネックになる場合は、問題専用に
+//   apply / rollback 型LNSへ書き換える。
+//
+// 用例: AHC059
+// ================================================================
+
+type LNSResult<State> = {
+  bestState: State;
+  bestScore: number;
+  currentState: State;
+  currentScore: number;
+  iterations: number;
+  accepted: number;
+  improved: number;
+};
+
+type LNSAccept = (
+  currentScore: number,
+  nextScore: number,
+  bestScore: number,
+  progress: number,
+  rng: RNG
+) => boolean;
+
+function lnsAcceptImproveMin(
+  currentScore: number,
+  nextScore: number,
+  bestScore: number,
+  progress: number,
+  rng: RNG
+): boolean {
+  return nextScore < currentScore;
+}
+
+function lnsAcceptImproveMax(
+  currentScore: number,
+  nextScore: number,
+  bestScore: number,
+  progress: number,
+  rng: RNG
+): boolean {
+  return nextScore > currentScore;
+}
+
+function makeLnsRRTMin(
+  startThreshold: number,
+  endThreshold: number
+): LNSAccept {
+  return (
+    currentScore: number,
+    nextScore: number,
+    bestScore: number,
+    progress: number,
+    rng: RNG
+  ) => {
+    let threshold =
+      startThreshold+(endThreshold-startThreshold)*progress;
+    return nextScore <= bestScore+threshold;
+  };
+}
+
+function makeLnsRRTMax(
+  startThreshold: number,
+  endThreshold: number
+): LNSAccept {
+  return (
+    currentScore: number,
+    nextScore: number,
+    bestScore: number,
+    progress: number,
+    rng: RNG
+  ) => {
+    let threshold =
+      startThreshold+(endThreshold-startThreshold)*progress;
+    return nextScore >= bestScore-threshold;
+  };
+}
+
+function lnsMinimize<State,Removed>(
+  initialState: State,
+  iterations: number,
+  rng: RNG,
+  cloneState: (state: State) => State,
+  evaluate: (state: State) => number,
+  destroy: (state: State,rng: RNG) => Removed,
+  repair: (state: State,removed: Removed,rng: RNG) => void,
+  accept: LNSAccept = lnsAcceptImproveMin
+): LNSResult<State> {
+  let currentState = cloneState(initialState);
+  let currentScore = evaluate(currentState);
+
+  let bestState = cloneState(currentState);
+  let bestScore = currentScore;
+
+  let accepted = 0;
+  let improved = 0;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    let nextState = cloneState(currentState);
+
+    let removed = destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    let nextScore = evaluate(nextState);
+    let progress = iterations <= 1 ? 1 : iter/(iterations-1);
+
+    if (nextScore < bestScore) {
+      bestState = cloneState(nextState);
+      bestScore = nextScore;
+      improved++;
+    }
+
+    if (accept(currentScore,nextScore,bestScore,progress,rng)) {
+      currentState = nextState;
+      currentScore = nextScore;
+      accepted++;
+    }
+  }
+
+  return {
+    bestState,
+    bestScore,
+    currentState,
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+function lnsMaximize<State,Removed>(
+  initialState: State,
+  iterations: number,
+  rng: RNG,
+  cloneState: (state: State) => State,
+  evaluate: (state: State) => number,
+  destroy: (state: State,rng: RNG) => Removed,
+  repair: (state: State,removed: Removed,rng: RNG) => void,
+  accept: LNSAccept = lnsAcceptImproveMax
+): LNSResult<State> {
+  let currentState = cloneState(initialState);
+  let currentScore = evaluate(currentState);
+
+  let bestState = cloneState(currentState);
+  let bestScore = currentScore;
+
+  let accepted = 0;
+  let improved = 0;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    let nextState = cloneState(currentState);
+
+    let removed = destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    let nextScore = evaluate(nextState);
+    let progress = iterations <= 1 ? 1 : iter/(iterations-1);
+
+    if (nextScore > bestScore) {
+      bestState = cloneState(nextState);
+      bestScore = nextScore;
+      improved++;
+    }
+
+    if (accept(currentScore,nextScore,bestScore,progress,rng)) {
+      currentState = nextState;
+      currentScore = nextScore;
+      accepted++;
+    }
+  }
+
+  return {
+    bestState,
+    bestScore,
+    currentState,
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+function lnsMinimizeUntil<State,Removed>(
+  initialState: State,
+  timer: Timer,
+  timeLimit: number,
+  rng: RNG,
+  cloneState: (state: State) => State,
+  evaluate: (state: State) => number,
+  destroy: (state: State,rng: RNG) => Removed,
+  repair: (state: State,removed: Removed,rng: RNG) => void,
+  accept: LNSAccept = lnsAcceptImproveMin,
+  checkInterval: number = 1
+): LNSResult<State> {
+  let currentState = cloneState(initialState);
+  let currentScore = evaluate(currentState);
+
+  let bestState = cloneState(currentState);
+  let bestScore = currentScore;
+
+  let iterations = 0;
+  let accepted = 0;
+  let improved = 0;
+
+  checkInterval = Math.max(1,checkInterval);
+
+  while (true) {
+    if (iterations%checkInterval == 0 && timer.over(timeLimit)) break;
+
+    let nextState = cloneState(currentState);
+
+    let removed = destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    let nextScore = evaluate(nextState);
+    let progress = timer.progress(timeLimit);
+
+    if (nextScore < bestScore) {
+      bestState = cloneState(nextState);
+      bestScore = nextScore;
+      improved++;
+    }
+
+    if (accept(currentScore,nextScore,bestScore,progress,rng)) {
+      currentState = nextState;
+      currentScore = nextScore;
+      accepted++;
+    }
+
+    iterations++;
+  }
+
+  return {
+    bestState,
+    bestScore,
+    currentState,
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
+function lnsMaximizeUntil<State,Removed>(
+  initialState: State,
+  timer: Timer,
+  timeLimit: number,
+  rng: RNG,
+  cloneState: (state: State) => State,
+  evaluate: (state: State) => number,
+  destroy: (state: State,rng: RNG) => Removed,
+  repair: (state: State,removed: Removed,rng: RNG) => void,
+  accept: LNSAccept = lnsAcceptImproveMax,
+  checkInterval: number = 1
+): LNSResult<State> {
+  let currentState = cloneState(initialState);
+  let currentScore = evaluate(currentState);
+
+  let bestState = cloneState(currentState);
+  let bestScore = currentScore;
+
+  let iterations = 0;
+  let accepted = 0;
+  let improved = 0;
+
+  checkInterval = Math.max(1,checkInterval);
+
+  while (true) {
+    if (iterations%checkInterval == 0 && timer.over(timeLimit)) break;
+
+    let nextState = cloneState(currentState);
+
+    let removed = destroy(nextState,rng);
+    repair(nextState,removed,rng);
+
+    let nextScore = evaluate(nextState);
+    let progress = timer.progress(timeLimit);
+
+    if (nextScore > bestScore) {
+      bestState = cloneState(nextState);
+      bestScore = nextScore;
+      improved++;
+    }
+
+    if (accept(currentScore,nextScore,bestScore,progress,rng)) {
+      currentState = nextState;
+      currentScore = nextScore;
+      accepted++;
+    }
+
+    iterations++;
+  }
+
+  return {
+    bestState,
+    bestScore,
+    currentState,
+    currentScore,
+    iterations,
+    accepted,
+    improved
+  };
+}
+
 // end
 
 function readInput() {

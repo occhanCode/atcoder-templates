@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v21.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v21.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v21.mjs > main.cpp
+ *   node ts_main_to_cpp_v22.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v22.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v22.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v21.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v22.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -271,7 +271,10 @@ class Converter {
         if (name==='min'||name==='max') return node.arguments.some(a=>this.exprUsesReal(a));
         return true;
       }
-      return node.arguments.some(a=>this.exprUsesReal(a));
+      // A real argument does not imply a real return value.  In v21, calls such as
+      // lnsMinimizeUntil(state,timer,1.85,...) incorrectly promoted the whole result
+      // object, and then result.bestState could contaminate vector<ll> into vector<double>.
+      return this.inferExpr(node).kind==='real';
     }
     if (ts.isArrayLiteralExpression(node)) return node.elements.some(e=>this.exprUsesReal(e));
     return false;
@@ -799,7 +802,18 @@ class Converter {
         [ts.SyntaxKind.ExclamationEqualsEqualsToken,'!='],[ts.SyntaxKind.ExclamationEqualsToken,'!='],
         [ts.SyntaxKind.AsteriskAsteriskToken,'**'],
       ]);
-      if (opk===ts.SyntaxKind.AsteriskAsteriskToken) return `pow(${this.emitExpr(node.left)},${this.emitExpr(node.right)})`;
+      if (opk===ts.SyntaxKind.AsteriskAsteriskToken) {
+        // Keep safe constant integer powers integral (e.g. 10**9 -> 1000000000)
+        // instead of routing them through std::pow(double,double).
+        if (ts.isNumericLiteral(node.left) && ts.isNumericLiteral(node.right)) {
+          const a=Number(node.left.text), b=Number(node.right.text);
+          if (Number.isSafeInteger(a) && Number.isSafeInteger(b) && b>=0) {
+            const value=a**b;
+            if (Number.isSafeInteger(value)) return String(value);
+          }
+        }
+        return `pow(${this.emitExpr(node.left)},${this.emitExpr(node.right)})`;
+      }
       const op=opMap.get(opk) || ts.tokenToString(opk) || node.operatorToken.getText(this.sf);
       const lt=this.inferExpr(node.left), rt=this.inferExpr(node.right);
       // TS string indexing returns a one-character string; in C++ it is char.
@@ -1054,6 +1068,9 @@ class Converter {
           const r=args[1]?this.emitExpr(args[1]):null;
           return r?`${obj}.substr(${l},${r}-${l})`:`${obj}.substr(${l})`;
         }
+        // Array.slice() with no arguments is a value copy.  C++ vector assignment/
+        // return-by-value already has exactly that semantics, so no helper is needed.
+        if (args.length===0) return obj;
         this.needHelpers.add('vec_slice');
         return `vec_slice(${obj},${args[0]?this.emitExpr(args[0]):'0'},${args[1]?this.emitExpr(args[1]):`${obj}.size()`})`;
       }
@@ -1400,6 +1417,19 @@ class Converter {
   }
 
   emitExpressionStatement(e) {
+    // Array.length assignment used as a mutating statement.
+    // `a.length = 0` -> clear(), otherwise resize().
+    if (
+      ts.isBinaryExpression(e)
+      && e.operatorToken.kind===ts.SyntaxKind.EqualsToken
+      && ts.isPropertyAccessExpression(e.left)
+      && e.left.name.text==='length'
+    ) {
+      const obj=this.emitExpr(e.left.expression);
+      if (ts.isNumericLiteral(e.right) && Number(e.right.text)===0) return `${obj}.clear();`;
+      return `${obj}.resize(${this.emitExpr(e.right)});`;
+    }
+
     // console.log / println / print
     if (ts.isCallExpression(e)) {
       if (ts.isIdentifier(e.expression) && ['println','print'].includes(e.expression.text)) return this.emitOutput(e.expression.text,e.arguments);
@@ -1455,7 +1485,7 @@ class Converter {
         return out+';';
       }
       const obj=this.emitExpr(args[0]);
-      return `for(int i=0;i<(int)${obj}.size();i++){ if(i) cout<<${sep}; cout<<${obj}[i]; }${kind==='println'?" cout<<'\n';":''}`;
+      return `for(int i=0;i<(int)${obj}.size();i++){ if(i) cout<<${sep}; cout<<${obj}[i]; }${kind==='println'?" cout<<'\\n';":''}`;
     }
     if (args.length===1 && ts.isCallExpression(args[0]) && ts.isPropertyAccessExpression(args[0].expression) && args[0].expression.name.text==='join') {
       const call=args[0], obj=this.emitExpr(call.expression.expression), sep=call.arguments[0]&&ts.isStringLiteral(call.arguments[0])?call.arguments[0].text:' ';
@@ -1537,7 +1567,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v21',
+      '// Generated by ts_main_to_cpp_v22',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',

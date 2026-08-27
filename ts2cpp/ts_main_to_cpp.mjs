@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v21.
+ * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v26.
  *
  * Design goal:
  *   - Parse TypeScript with the official TypeScript parser.
@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v22.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v22.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v22.mjs > main.cpp
+ *   node ts_main_to_cpp_v28.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v28.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v28.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     else if (a==='--cpp-template') r.cppTemplate=argv[++i];
     else if (a==='--deps') r.deps=true;
     else if (a==='--no-deps') r.deps=false;
-    else if (a==='--version') { console.log('ts_main_to_cpp_v21 21.0.0'); process.exit(0); }
+    else if (a==='--version') { console.log('ts_main_to_cpp_v28 28.0.0'); process.exit(0); }
     else if (a==='--double') {
       const v=argv[++i]; if (!v) throw new Error('--double requires a variable name or comma-separated names');
       r.doubleNames.push(...v.split(',').map(x=>x.trim()).filter(Boolean));
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v22.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v28.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -179,6 +179,8 @@ class Converter {
     this.env=new Map();
     this.warnings=[];
     this.tmpId=0;
+    this.inMainBody=false;
+    this.returnExpected=TypeInfo.unknown();
     this.needHelpers=new Set();
     this.tupleWidths=this.collectTupleWidths();
     this.topLevelDefs=this.collectTopLevelDefs();
@@ -544,7 +546,13 @@ class Converter {
       if ([ts.SyntaxKind.EqualsEqualsToken,ts.SyntaxKind.EqualsEqualsEqualsToken,ts.SyntaxKind.ExclamationEqualsToken,ts.SyntaxKind.ExclamationEqualsEqualsToken,
            ts.SyntaxKind.LessThanToken,ts.SyntaxKind.LessThanEqualsToken,ts.SyntaxKind.GreaterThanToken,ts.SyntaxKind.GreaterThanEqualsToken,
            ts.SyntaxKind.AmpersandAmpersandToken,ts.SyntaxKind.BarBarToken].includes(op)) return TypeInfo.bool();
-      return mergeType(this.inferExpr(node.left),this.inferExpr(node.right));
+      const lt=this.inferExpr(node.left), rt=this.inferExpr(node.right);
+      // In TypeScript, + becomes string concatenation as soon as either side is string-like.
+      // Preserve that fact recursively so chains such as 1+" "+x+" " keep converting
+      // every later numeric operand with to_string_any().
+      if (op===ts.SyntaxKind.PlusToken && ['string','char'].includes(lt.kind) ||
+          op===ts.SyntaxKind.PlusToken && ['string','char'].includes(rt.kind)) return TypeInfo.string();
+      return mergeType(lt,rt);
     }
     if (ts.isConditionalExpression(node)) return mergeType(this.inferExpr(node.whenTrue),this.inferExpr(node.whenFalse));
     if (ts.isElementAccessExpression(node)) {
@@ -623,7 +631,7 @@ class Converter {
           }
           return TypeInfo.vector(TypeInfo.unknown());
         }
-        if (name==='filter'||name==='slice'||name==='reverse'||name==='sort'||name==='fill') return base.kind==='array'?TypeInfo.vector(base.elem):base;
+        if (name==='filter'||name==='slice'||name==='reverse'||name==='sort'||name==='fill'||name==='concat') return base.kind==='array'?TypeInfo.vector(base.elem):base;
         if (name==='pop'||name==='at') return (base.kind==='vector'||base.kind==='array')?base.elem:TypeInfo.unknown();
         if (name==='get' && base.kind==='map') return base.value;
         if (['has','includes'].includes(name)) return TypeInfo.bool();
@@ -631,7 +639,15 @@ class Converter {
         if (name==='substring'||name==='substr'||(name==='slice'&&base.kind==='string')) return TypeInfo.string();
       }
       if (ts.isPropertyAccessExpression(callee) && callee.expression.getText(this.sf)==='Array' && callee.name.text==='from') {
-        const a=node.arguments[0];
+        const a=node.arguments[0], fn=node.arguments[1];
+        if (a && ts.isObjectLiteralExpression(a) && fn && (ts.isArrowFunction(fn)||ts.isFunctionExpression(fn)) && ts.isExpression(fn.body)) {
+          const saved=new Map(this.env);
+          if (fn.parameters[0]?.name && ts.isIdentifier(fn.parameters[0].name)) this.env.set(fn.parameters[0].name.text,TypeInfo.unknown());
+          if (fn.parameters[1]?.name && ts.isIdentifier(fn.parameters[1].name)) this.env.set(fn.parameters[1].name.text,TypeInfo.number());
+          const r=this.inferExpr(fn.body);
+          this.env=saved;
+          return TypeInfo.vector(r.kind==='unknown'?TypeInfo.number():r);
+        }
         const at=this.inferExpr(a);
         if (at.kind==='set') return TypeInfo.vector(at.elem);
         return at.kind==='vector'||at.kind==='array'?TypeInfo.vector(at.elem):TypeInfo.vector(TypeInfo.unknown());
@@ -639,6 +655,13 @@ class Converter {
       if (ts.isPropertyAccessExpression(callee) && callee.expression.getText(this.sf)==='Math') {
         const name=callee.name.text;
         if (['floor','ceil','round','trunc','clz32','sign'].includes(name)) return TypeInfo.number();
+        // In this converter, TypeScript `number` is represented as ll unless the
+        // expression is known to be floating-point. Math.abs/min/max preserve an
+        // integral argument/result, so do not promote them to double gratuitously.
+        if (name==='abs') {
+          const t=node.arguments.length ? this.inferExpr(node.arguments[0]) : TypeInfo.unknown();
+          return t.kind==='unknown'?TypeInfo.number():t;
+        }
         if (name==='min'||name==='max') {
           let t=TypeInfo.unknown();
           for (const a of node.arguments) t=mergeType(t,this.inferExpr(a));
@@ -701,16 +724,28 @@ class Converter {
           let bodyExpr=a1.body;
           while (ts.isAsExpression(bodyExpr) || ts.isTypeAssertionExpression(bodyExpr) || ts.isParenthesizedExpression(bodyExpr)) bodyExpr=bodyExpr.expression;
           const annotatedInner=(ts.isAsExpression(a1.body)||ts.isTypeAssertionExpression(a1.body)) ? this.typeFromTypeNode(a1.body.type) : TypeInfo.unknown();
-          if (ts.isArrayLiteralExpression(bodyExpr) && bodyExpr.elements.length===0) {
-            const innerType=annotatedInner.kind!=='unknown' ? annotatedInner : (innerExpected.kind!=='unknown' ? innerExpected : TypeInfo.vector(TypeInfo.number()));
-            const outer=TypeInfo.vector(innerType);
-            return { code:`${typeToCpp(outer)}(${this.emitExpr(len)})`, type:outer };
-          }
-          const innerFactory=this.emitArrayFactory(bodyExpr,innerExpected);
-          const innerType=annotatedInner.kind!=='unknown' ? annotatedInner : (innerFactory?.type || this.inferExpr(bodyExpr));
+
+          const saved=new Map(this.env);
+          const valueName=a1.parameters[0]?.name && ts.isIdentifier(a1.parameters[0].name) ? a1.parameters[0].name.text : null;
+          const indexName=a1.parameters[1]?.name && ts.isIdentifier(a1.parameters[1].name) ? a1.parameters[1].name.text : null;
+          if (valueName) this.env.set(valueName,TypeInfo.unknown());
+          if (indexName) this.env.set(indexName,TypeInfo.number());
+
+          const inferredInner=this.inferExpr(bodyExpr);
+          const innerType=annotatedInner.kind!=='unknown' ? annotatedInner : (innerExpected.kind!=='unknown' ? innerExpected : (inferredInner.kind==='unknown'?TypeInfo.number():inferredInner));
           const outer=TypeInfo.vector(innerType);
-          const innerCode=innerFactory?.code || this.emitExpr(bodyExpr,innerExpected);
-          return { code:`${typeToCpp(outer)}(${this.emitExpr(len)},${innerCode})`, type:outer };
+          const bodyCode=this.emitExpr(bodyExpr,innerType);
+          this.env=saved;
+
+          // Array.from({length:n}, callback) calls callback once per element.
+          // A vector fill constructor is not equivalent when callback reads input,
+          // uses randomness, or depends on the index. Emit the actual loop.
+          const id=this.tmpId++;
+          const loopIndex=indexName || `__ts2cpp_from_i${id}`;
+          const resultName=`__ts2cpp_from_r${id}`;
+          const valueDecl=(valueName && valueName!=='_') ? ` ll ${valueName}=0;` : '';
+          const code=`([&](){ ${typeToCpp(outer)} ${resultName}; ${resultName}.reserve(${this.emitExpr(len)}); for(ll ${loopIndex}=0; ${loopIndex}<${this.emitExpr(len)}; ++${loopIndex}){${valueDecl} ${resultName}.push_back(${bodyCode}); } return ${resultName}; }())`;
+          return {code,type:outer};
         }
       }
       // Array.from(new Set(A)) -> helper preserving JS Set insertion order.
@@ -881,8 +916,54 @@ class Converter {
     return node.getText(this.sf);
   }
 
+  declaredLocalType(body,name) {
+    let found=TypeInfo.unknown();
+    const visit=(n)=>{
+      if (found.kind!=='unknown') return;
+      // Do not inspect nested function scopes.
+      if (n!==body && (ts.isArrowFunction(n)||ts.isFunctionExpression(n)||ts.isFunctionDeclaration(n))) return;
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text===name) {
+        if (n.type) found=this.typeFromTypeNode(n.type);
+        else if (n.initializer) found=this.inferExpr(n.initializer);
+        return;
+      }
+      ts.forEachChild(n,visit);
+    };
+    visit(body);
+    return found;
+  }
+
+  inferLambdaReturnType(node) {
+    if (node.type) return this.typeFromTypeNode(node.type);
+    if (!ts.isBlock(node.body)) return this.inferExpr(node.body);
+
+    let merged=TypeInfo.unknown();
+    const body=node.body;
+    const visit=(n)=>{
+      // Returns inside nested lambdas/functions belong to another scope.
+      if (n!==body && (ts.isArrowFunction(n)||ts.isFunctionExpression(n)||ts.isFunctionDeclaration(n))) return;
+      if (ts.isReturnStatement(n) && n.expression) {
+        const e=n.expression;
+        // Empty [] has no element type by itself. Infer it from another return.
+        if (ts.isArrayLiteralExpression(e) && e.elements.length===0) return;
+        let t=TypeInfo.unknown();
+        if (ts.isIdentifier(e)) t=this.declaredLocalType(body,e.text);
+        if (t.kind==='unknown') t=this.inferExpr(e);
+        merged=mergeType(merged,t);
+        return;
+      }
+      ts.forEachChild(n,visit);
+    };
+    visit(body);
+    return merged;
+  }
+
   emitLambda(node) {
     const saved=new Map(this.env);
+    const savedMain=this.inMainBody;
+    const savedReturnExpected=this.returnExpected;
+    this.inMainBody=false;
+    this.returnExpected=this.inferLambdaReturnType(node);
     const ps=[];
     for (const p of node.parameters) {
       if (!ts.isIdentifier(p.name)) {
@@ -895,9 +976,16 @@ class Converter {
     }
     let body;
     if (ts.isBlock(node.body)) body=this.emitBlock(node.body,0,true);
-    else body=`{ return ${this.emitExpr(node.body)}; }`;
+    else body=`{ return ${this.emitExpr(node.body,this.returnExpected)}; }`;
+    // C++ lambda return-type deduction requires every return expression to have
+    // exactly the same type. TypeScript permits implicit numeric conversions, so
+    // emit a trailing return type whenever we can infer one. This also makes
+    // explicit TS annotations such as `(x): number => ...` authoritative.
+    const ret=this.returnExpected.kind==='unknown' ? '' : ` -> ${typeToCpp(this.returnExpected)}`;
     this.env=saved;
-    return `[&](${ps.join(',')}) ${body}`;
+    this.inMainBody=savedMain;
+    this.returnExpected=savedReturnExpected;
+    return `[&](${ps.join(',')})${ret} ${body}`;
   }
 
   emitComparator(fn) {
@@ -944,6 +1032,18 @@ class Converter {
       this.env=saved;
       return `[&](const auto& ${a},const auto& ${b}){ return (${e})<0; }`;
     }
+    // A JavaScript/TypeScript Array.sort comparator conventionally returns a
+    // negative/zero/positive NUMBER.  A C++ std::sort comparator must return
+    // bool.  Expression-bodied callbacks are handled above; for a block body,
+    // evaluate the original comparator and compare its result with zero.
+    // This preserves local variables and early returns inside the callback.
+    if (ts.isBlock(fn.body)) {
+      // Array.sort's callback is a three-way comparator in JS/TS.  Even when
+      // local declarations make static return-type inference difficult, keep
+      // that JS contract by evaluating the callback and testing `< 0`.
+      const inner=this.emitLambda(fn);
+      return `[&](const auto& ${a},const auto& ${b}){ return (${inner})(${a},${b})<0; }`;
+    }
     return this.emitLambda(fn);
   }
 
@@ -956,6 +1056,26 @@ class Converter {
     if (ts.isIdentifier(callee)) {
       if (callee.text==='seedFromClock') { this.needHelpers.add('ahc_seed_clock'); return 'seedFromClock()'; }
       const name=callee.text;
+      // Input helpers may appear inside expressions/callbacks such as
+      // Array.from({length:N},()=>nextNums(4)). Lower them to small IIFEs.
+      if (name==='nextNum'||name==='nextBigInt') {
+        const id=this.tmpId++;
+        return `([&](){ ll __ts2cpp_in${id}; cin>>__ts2cpp_in${id}; return __ts2cpp_in${id}; }())`;
+      }
+      if (name==='nextNums'||name==='nextBigInts') {
+        const id=this.tmpId++;
+        const n=args[0]?this.emitExpr(args[0]):'0';
+        return `([&](){ vector<ll> __ts2cpp_in${id}(${n}); for(auto &__ts2cpp_v:${'__ts2cpp_in'+id}) cin>>__ts2cpp_v; return __ts2cpp_in${id}; }())`;
+      }
+      if (name==='nexts') {
+        const id=this.tmpId++;
+        const n=args[0]?this.emitExpr(args[0]):'0';
+        return `([&](){ vector<string> __ts2cpp_in${id}(${n}); for(auto &__ts2cpp_v:${'__ts2cpp_in'+id}) cin>>__ts2cpp_v; return __ts2cpp_in${id}; }())`;
+      }
+      if (name==='next'||name==='nextAwait') {
+        const id=this.tmpId++;
+        return `([&](){ string __ts2cpp_in${id}; cin>>__ts2cpp_in${id}; return __ts2cpp_in${id}; }())`;
+      }
       if (name==='BigInt') return `(ll)(${args[0]?this.emitExpr(args[0]):'0'})`;
       if (name==='Number') {
         if (!args[0]) return '0.0';
@@ -1020,6 +1140,20 @@ class Converter {
         return `BeamSearch::${name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
       }
 
+      if (name==='concat') {
+        const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.number();
+        const id=this.tmpId++;
+        const r=`__ts2cpp_concat${id}`;
+        const lines=[`auto ${r}=${obj};`];
+        for (const a of args) {
+          const at=this.inferExpr(a);
+          const ac=this.emitExpr(a,et);
+          if (at.kind==='vector'||at.kind==='array') lines.push(`${r}.insert(${r}.end(),${ac}.begin(),${ac}.end());`);
+          else lines.push(`${r}.push_back(${ac});`);
+        }
+        lines.push(`return ${r};`);
+        return `([&](){ ${lines.join(' ')} }())`;
+      }
       if (name==='push') { const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.unknown(); return `${obj}.push_back(${args.map(x=>this.emitExpr(x,et)).join(',')})`; }
       if (name==='fill') { const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.unknown(); const v=args[0]?this.emitExpr(args[0],et):'0'; return `(fill(${obj}.begin(),${obj}.end(),${v}),${obj})`; }
       if (name==='pop') return `${obj}.back()`; // statement emitter adds pop_back when value unused
@@ -1138,6 +1272,34 @@ class Converter {
     return `([&](){ auto ${a}=${initCode}; for(auto ${x}:${obj}) ${a}=${expr}; return ${a}; }())`;
   }
 
+  normalizeQueueRecordType(t) {
+    if (!t) return t;
+    if (t.kind==='array' && t.size===0 && (!t.elem || t.elem.kind==='unknown')) {
+      // In competitive-programming queues, an empty [] inside a heterogeneous
+      // record is overwhelmingly used as a growable numeric path/list.  Treat it
+      // as vector<ll> rather than the invalid array<auto,0>.  Later operations
+      // such as ans.concat(to) then keep the same vector type.
+      return TypeInfo.vector(TypeInfo.number());
+    }
+    if (t.kind==='tuple') return TypeInfo.tuple(t.elems.map(x=>this.normalizeQueueRecordType(x)));
+    if (t.kind==='array') return TypeInfo.array(this.normalizeQueueRecordType(t.elem),t.size);
+    if (t.kind==='vector') return TypeInfo.vector(this.normalizeQueueRecordType(t.elem));
+    return t;
+  }
+
+  inferQueueLiteralType(init, annotated) {
+    if (!ts.isArrayLiteralExpression(init) || init.elements.length===0) return null;
+    const first=init.elements[0];
+    if (!ts.isArrayLiteralExpression(first)) return null;
+    let record=this.normalizeQueueRecordType(this.inferExpr(first));
+    if (record.kind!=='tuple' && record.kind!=='array') return null;
+    // `let q:any[]=[[...]]` intentionally asks TS not to type the record.  Recover
+    // the fixed record shape from the literal so C++ can use vector<tuple<...>>.
+    if (annotated.kind==='vector' && annotated.elem?.kind==='unknown') return TypeInfo.vector(record);
+    if (annotated.kind==='unknown') return TypeInfo.vector(record);
+    return null;
+  }
+
   emitVarDecl(decl, isConst=false) {
     if (!ts.isIdentifier(decl.name)) {
       if (ts.isArrayBindingPattern(decl.name)) return this.emitBindingDecl(decl);
@@ -1217,7 +1379,14 @@ class Converter {
       this.env.set(name,t);
       // Re-emit the factory with the promoted expected type so fill(0) becomes vector<double>, etc.
       const promotedFac=this.emitArrayFactory(init,t) || fac;
-      return `${typeToCpp(t)} ${name}=${promotedFac.code};`;
+      const cppType=typeToCpp(t);
+      // Prefer direct initialization for factory expressions of the same type.
+      // Besides being shorter, `vector<set<string>> set(K);` avoids the C++ name
+      // lookup trap in `vector<set<string>> set=vector<set<string>>(K);`.
+      if (promotedFac.code.startsWith(cppType+'(') && promotedFac.code.endsWith(')')) {
+        return `${cppType} ${name}${promotedFac.code.slice(cppType.length)};`;
+      }
+      return `${cppType} ${name}=${promotedFac.code};`;
     }
 
     // User-template queue idiom: [[number,number,string]] with later push([..])
@@ -1232,15 +1401,20 @@ class Converter {
     // Array literal: prefer std::array for fixed tuples nested in a vector-style literal.
     if (ts.isArrayLiteralExpression(init)) {
       const inferred=this.inferExpr(init);
-      let t=annotated.kind==='unknown'?inferred:annotated;
+      const queueType=this.inferQueueLiteralType(init,annotated);
+      let t=queueType || (annotated.kind==='unknown'?inferred:annotated);
       // Top-level [1,2,3] is usually a mutable TS array => vector; nested tuples remain array.
-      if (annotated.kind==='unknown') t=TypeInfo.vector(inferred.elem);
+      if (!queueType && annotated.kind==='unknown') t=TypeInfo.vector(inferred.elem);
       t=this.applyRealPromotion(name,t,decl.name);
       t=this.applyU64Promotion(name,t,decl.name);
       this.env.set(name,t);
       const body=init.elements.map(e => {
         if (ts.isArrayLiteralExpression(e)) {
-          const et=this.inferExpr(e);
+          // If the outer container already has a fixed record type, use it as the
+          // contextual type.  This is essential for fields such as [] in
+          // `let que:any[]=[[pos,par,"",[],0]]`.
+          if (t.kind==='vector' && (t.elem?.kind==='tuple'||t.elem?.kind==='array'||t.elem?.kind==='vector')) return this.emitExpr(e,t.elem);
+          const et=this.normalizeQueueRecordType(this.inferExpr(e));
           if (et.kind==='tuple') return this.emitExpr(e,et);
           return `array<${typeToCpp(et.elem)},${e.elements.length}>{${e.elements.map(x=>this.emitExpr(x,et.elem)).join(',')}}`;
         }
@@ -1293,9 +1467,22 @@ class Converter {
       }
       return `${decls.join(' ')} cin>>${names.join('>>')};`;
     }
-    for (const n of names) this.env.set(n,TypeInfo.unknown());
+    const initType=this.inferExpr(init);
+    if (initType.kind==='tuple') names.forEach((n,i)=>this.env.set(n,initType.elems[i]||TypeInfo.unknown()));
+    else if (initType.kind==='array'||initType.kind==='vector') names.forEach(n=>this.env.set(n,initType.elem));
+    else names.forEach(n=>this.env.set(n,TypeInfo.unknown()));
     if (ts.isArrayLiteralExpression(init) && init.elements.length===names.length) {
       return `auto [${names.join(',')}]=array{${init.elements.map(x=>this.emitExpr(x)).join(',')}};`;
+    }
+    // std::vector is not tuple-like, so C++ structured binding cannot destructure it.
+    // TypeScript array destructuring copies each selected element. Emit that explicitly.
+    if (initType.kind==='vector') {
+      const id=this.tmpId++;
+      const tmp=`__ts2cpp_bind${id}`;
+      const et=initType.elem.kind==='unknown'?TypeInfo.number():initType.elem;
+      const lines=[`auto&& ${tmp}=${this.emitExpr(init)};`];
+      for (let i=0;i<names.length;i++) lines.push(`${typeToCpp(et)} ${names[i]}=${tmp}[${i}];`);
+      return lines.join(' ');
     }
     return `auto [${names.join(',')}]=${this.emitExpr(init)};`;
   }
@@ -1332,10 +1519,10 @@ class Converter {
           for (const d of st.initializer.declarations) {
             if (ts.isIdentifier(d.name)) {
               const name=d.name.text; this.env.set(name,TypeInfo.number());
-              ds.push(`${NUM} ${name}${d.initializer?'='+this.emitExpr(d.initializer):''}`);
+              ds.push(`${name}${d.initializer?'='+this.emitExpr(d.initializer):''}`);
             }
           }
-          init=ds.join(',');
+          init=ds.length?`${NUM} ${ds.join(',')}`:'';
         } else init=this.emitExpr(st.initializer);
       }
       return `for(${init};${st.condition?this.emitExpr(st.condition):''};${st.incrementor?this.emitExpr(st.incrementor):''}) ${this.statementAsBlock(st.statement,level)}`;
@@ -1373,7 +1560,7 @@ class Converter {
     }
     if (ts.isWhileStatement(st)) return `while(${this.emitExpr(st.expression)}) ${this.statementAsBlock(st.statement,level)}`;
     if (ts.isDoStatement(st)) return `do ${this.statementAsBlock(st.statement,level)} while(${this.emitExpr(st.expression)});`;
-    if (ts.isReturnStatement(st)) return st.expression?`return ${this.emitExpr(st.expression)};`:'return;';
+    if (ts.isReturnStatement(st)) return st.expression?`return ${this.emitExpr(st.expression,this.returnExpected)};`:(this.inMainBody?'return 0;':'return;');
     if (ts.isLabeledStatement(st)) {
       const rawLabel=st.label.text;
       const label=rawLabel.replace(/[^A-Za-z0-9_]/g,'_');
@@ -1433,6 +1620,12 @@ class Converter {
     // console.log / println / print
     if (ts.isCallExpression(e)) {
       if (ts.isIdentifier(e.expression) && ['println','print'].includes(e.expression.text)) return this.emitOutput(e.expression.text,e.arguments);
+      // Standalone input consumption, e.g. `nextNums(2);` when fields are intentionally ignored.
+      if (ts.isIdentifier(e.expression) && ['nextNums','nextBigInts'].includes(e.expression.text)) {
+        const n=e.arguments[0]?this.emitExpr(e.arguments[0]):'1';
+        const id=this.tmpId++;
+        return `for(ll __ts2cpp_i${id}=0;__ts2cpp_i${id}<${n};__ts2cpp_i${id}++){ ll __ts2cpp_dummy${id}; cin>>__ts2cpp_dummy${id}; }`;
+      }
       if (ts.isPropertyAccessExpression(e.expression) && e.expression.expression.getText(this.sf)==='console' && e.expression.name.text==='log') { const out=this.emitOutput('println',e.arguments); return out.replace(/<<'\\n';$/, '<<endl;'); }
 
       // sort mutates in-place.
@@ -1547,7 +1740,10 @@ class Converter {
     }
     const body=main?.body || {statements:this.sf.statements};
     const lines=[];
+    const savedMain=this.inMainBody;
+    this.inMainBody=!!main;
     for (const st of body.statements) lines.push(this.emitStatement(st));
+    this.inMainBody=savedMain;
     const bodyText=lines.join('\n');
     if (mode==='body') return bodyText+'\n';
     const mainText=`int main(){\n  ios::sync_with_stdio(false);\n  cin.tie(nullptr);\n\n${indent(bodyText)}\n\n  return 0;\n}`;
@@ -1567,7 +1763,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v22',
+      '// Generated by ts_main_to_cpp_v23',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',
@@ -1661,7 +1857,16 @@ function templateExtraHelpers(needHelpers) {
 
 function applyCppTemplate(templateText, convertedMainBlock, needHelpers) {
   const [l,r]=findCppMainRange(templateText);
-  const extra=templateExtraHelpers(needHelpers);
+  // A template may already contain helpers injected by an earlier conversion.
+  // Do not emit duplicate definitions when such a template is reused.
+  const filtered=new Set(needHelpers);
+  if (templateText.includes('unique_preserve(const vector<T>&')) filtered.delete('unique_preserve');
+  if (templateText.includes('vec_slice(const vector<T>&')) filtered.delete('vec_slice');
+  if (templateText.includes('join_vec(const vector<T>&')) filtered.delete('join_vec');
+  if (templateText.includes('to_string_any(const string&')) filtered.delete('to_string_any');
+  if (templateText.includes('ts_number_any(const string&')) filtered.delete('number_any');
+  if (templateText.includes('ts2cpp_date_now()')) filtered.delete('date_now');
+  const extra=templateExtraHelpers(filtered);
   const block=(extra?extra+'\n\n':'')+convertedMainBlock.trimEnd();
   return templateText.slice(0,l)+block+templateText.slice(r);
 }

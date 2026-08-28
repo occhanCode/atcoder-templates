@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v26.
+ * AtCoder-oriented TypeScript main() -> C++17 converter, AST edition v32.
  *
  * Design goal:
  *   - Parse TypeScript with the official TypeScript parser.
@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v28.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v28.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v28.mjs > main.cpp
+ *   node ts_main_to_cpp_v32.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v32.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v32.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     else if (a==='--cpp-template') r.cppTemplate=argv[++i];
     else if (a==='--deps') r.deps=true;
     else if (a==='--no-deps') r.deps=false;
-    else if (a==='--version') { console.log('ts_main_to_cpp_v28 28.0.0'); process.exit(0); }
+    else if (a==='--version') { console.log('ts_main_to_cpp_v32 32.0.0'); process.exit(0); }
     else if (a==='--double') {
       const v=argv[++i]; if (!v) throw new Error('--double requires a variable name or comma-separated names');
       r.doubleNames.push(...v.split(',').map(x=>x.trim()).filter(Boolean));
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v28.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v32.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -88,14 +88,14 @@ class TypeInfo {
   static array(elem=TypeInfo.unknown(), size=null){ return new TypeInfo('array',{elem,size}); }
   static set(elem=TypeInfo.unknown()){ return new TypeInfo('set',{elem}); }
   static map(key=TypeInfo.unknown(), value=TypeInfo.unknown()){ return new TypeInfo('map',{key,value}); }
-  static custom(name){ return new TypeInfo('custom',{name}); }
+  static custom(name,opt={}){ return new TypeInfo('custom',{name,...opt}); }
 }
 
 
 function sameType(a,b) {
   if (!a || !b || a.kind!==b.kind) return false;
   if (['number','u64','real','char','bool','string','unknown'].includes(a.kind)) return true;
-  if (a.kind==='custom') return a.name===b.name;
+  if (a.kind==='custom') return a.name===b.name && (a.name!=='PriorityQueue' || sameType(a.elem,b.elem));
   if (a.kind==='vector' || a.kind==='set') return sameType(a.elem,b.elem);
   if (a.kind==='array') return a.size===b.size && sameType(a.elem,b.elem);
   if (a.kind==='map') return sameType(a.key,b.key)&&sameType(a.value,b.value);
@@ -160,6 +160,7 @@ class Converter {
   constructor(sourceText, fileName='input.ts', options={}) {
     this.sourceText=sourceText;
     this.options=options;
+    this.templateCaps=options.templateCaps||{};
     this.doubleNames=new Set(options.doubleNames||[]);
     this.deps=!!options.deps;
     this.labelEnds=[];
@@ -578,7 +579,11 @@ class Converter {
       if (name==='Float32Array' || name==='Float64Array') return TypeInfo.vector(TypeInfo.real());
       if (['Int8Array','Int16Array','Int32Array','Uint8Array','Uint8ClampedArray','Uint16Array','Uint32Array','BigInt64Array','BigUint64Array'].includes(name)) return TypeInfo.vector(TypeInfo.number());
       if (name==='Array') return TypeInfo.vector(args.length?this.typeFromTypeNode(args[0]):TypeInfo.unknown());
-      if (name==='Timer'||name==='RNG'||name==='Annealing'||name==='ZobristHash') return TypeInfo.custom(name);
+      if (name==='Timer'||name==='RNG'||name==='Annealing'||name==='ZobristHash'||name==='UnionFind') return TypeInfo.custom(name);
+      if (name==='PriorityQueue') {
+        const elem=args.length?this.typeFromTypeNode(args[0]):TypeInfo.unknown();
+        return TypeInfo.custom('PriorityQueue',{elem});
+      }
     }
     if (ts.isCallExpression(node)) {
       const callee=node.expression;
@@ -612,6 +617,15 @@ class Converter {
           }
           if (base.name==='ZobristHash') {
             if (name==='value'||name==='changed'||name==='toggled') return TypeInfo.u64();
+          }
+          if (base.name==='UnionFind') {
+            if (name==='connect'||name==='same') return TypeInfo.bool();
+            if (name==='root'||name==='size') return TypeInfo.number();
+          }
+          if (base.name==='PriorityQueue') {
+            if (name==='pop'||name==='top'||name==='peek') return base.elem||TypeInfo.unknown();
+            if (name==='isEmpty'||name==='empty') return TypeInfo.bool();
+            if (name==='size') return TypeInfo.number();
           }
         }
         if (name==='map') {
@@ -889,6 +903,17 @@ class Converter {
       if (name==='Timer') this.needHelpers.add('ahc_timer');
       if (name==='RNG') this.needHelpers.add('ahc_rng');
       if (name==='Annealing') { this.needHelpers.add('ahc_annealing'); this.needHelpers.add('ahc_rng'); }
+      if (name==='UnionFind') {
+        if (this.templateCaps.dsu) return `DSU(${args.map(x=>this.emitExpr(x)).join(',')})`;
+        this.needHelpers.add('union_find');
+        return `UnionFind(${args.map(x=>this.emitExpr(x)).join(',')})`;
+      }
+      if (name==='PriorityQueue') {
+        this.needHelpers.add('priority_queue');
+        const elem=node.typeArguments?.length?this.typeFromTypeNode(node.typeArguments[0]):TypeInfo.unknown();
+        const cmp=args[0]?this.emitLambda(args[0]):`[&](const auto& a,const auto& b){ return a-b; }`;
+        return `TsPriorityQueue<${typeToCpp(elem)}>(${cmp})`;
+      }
       if (name==='Set') {
         const t=this.inferExpr(node); const ct=typeToCpp(t);
         if (args.length===0) return `${ct}()`;
@@ -947,7 +972,15 @@ class Converter {
         // Empty [] has no element type by itself. Infer it from another return.
         if (ts.isArrayLiteralExpression(e) && e.elements.length===0) return;
         let t=TypeInfo.unknown();
-        if (ts.isIdentifier(e)) t=this.declaredLocalType(body,e.text);
+        if (ts.isIdentifier(e)) {
+          t=this.declaredLocalType(body,e.text);
+          // The declaration may start from an integer literal (e.g. `let score = 0`)
+          // and later become real through `+= prob*(1-p)`.  emitVariableDeclaration()
+          // already promotes such locals to double via real-flow analysis, so the
+          // lambda return type must apply the same promotion.  Otherwise C++ gets
+          // `-> ll` and silently truncates the probabilistic score on return.
+          if (this.isRealIdentifier(e)) t=promoteNumericToReal(t);
+        }
         if (t.kind==='unknown') t=this.inferExpr(e);
         merged=mergeType(merged,t);
         return;
@@ -1140,11 +1173,34 @@ class Converter {
         return `BeamSearch::${name}(${args.map(x=>this.emitExpr(x)).join(',')})`;
       }
 
+      if (bt.kind==='custom' && bt.name==='UnionFind') {
+        const method=(bt.nativeDSU||this.templateCaps.dsu)
+          ? ({connect:'merge',root:'leader',same:'same',size:'size'}[name]||name)
+          : name;
+        return `${obj}.${method}(${args.map(x=>this.emitExpr(x)).join(',')})`;
+      }
+
+      if (bt.kind==='custom' && bt.name==='PriorityQueue') {
+        if (name==='push') return `${obj}.push(${args.map(x=>this.emitExpr(x,bt.elem||TypeInfo.unknown())).join(',')})`;
+        if (name==='pop') {
+          if (bt.nativePQ) {
+            const id=this.tmpId++;
+            return `([&](){ auto __ts2cpp_pqv${id}=${obj}.top(); ${obj}.pop(); return __ts2cpp_pqv${id}; }())`;
+          }
+          return `${obj}.pop()`;
+        }
+        if (name==='top'||name==='peek') return `${obj}.top()`;
+        if (name==='size') return `(ll)${obj}.size()`;
+        if (name==='isEmpty'||name==='empty') return `${obj}.empty()`;
+      }
+
       if (name==='concat') {
         const et=(bt.kind==='vector'||bt.kind==='array')?bt.elem:TypeInfo.number();
         const id=this.tmpId++;
         const r=`__ts2cpp_concat${id}`;
-        const lines=[`auto ${r}=${obj};`];
+        const lines=bt.kind==='array'
+          ? [`auto __ts2cpp_concat_base${id}=${obj};`,`vector<${typeToCpp(et)}> ${r}(__ts2cpp_concat_base${id}.begin(),__ts2cpp_concat_base${id}.end());`]
+          : [`auto ${r}=${obj};`];
         for (const a of args) {
           const at=this.inferExpr(a);
           const ac=this.emitExpr(a,et);
@@ -1423,6 +1479,29 @@ class Converter {
       return `${typeToCpp(t)} ${name}={${body}};`;
     }
 
+    // Common template classes used by AtCoder/AHC solutions.
+    if (ts.isNewExpression(init) && init.expression.getText(this.sf)==='UnionFind') {
+      const args=init.arguments||[];
+      this.env.set(name,TypeInfo.custom('UnionFind',{nativeDSU:!!this.templateCaps.dsu}));
+      if (this.templateCaps.dsu) {
+        return `DSU ${name}(${args.map(x=>this.emitExpr(x)).join(',')});`;
+      }
+      this.needHelpers.add('union_find');
+      return `UnionFind ${name}(${args.map(x=>this.emitExpr(x)).join(',')});`;
+    }
+    if (ts.isNewExpression(init) && init.expression.getText(this.sf)==='PriorityQueue') {
+      // The C++ template has minpq/maxpq, but TypeScript PriorityQueue accepts an
+      // arbitrary numeric comparator and pop() returns the removed value. Keep the
+      // small compatibility adapter so conversion preserves those semantics exactly.
+      this.needHelpers.add('priority_queue');
+      const elem=init.typeArguments?.length?this.typeFromTypeNode(init.typeArguments[0]):TypeInfo.unknown();
+      const qt=TypeInfo.custom('PriorityQueue',{elem,nativePQ:false});
+      this.env.set(name,qt);
+      const args=init.arguments||[];
+      const cmp=args[0]?this.emitLambda(args[0]):`[&](const auto& a,const auto& b){ return a-b; }`;
+      return `TsPriorityQueue<${typeToCpp(elem)}> ${name}(${cmp});`;
+    }
+
     // new Set / new Map.
     if (ts.isNewExpression(init)) {
       let t=annotated.kind==='unknown'?this.inferExpr(init):annotated;
@@ -1452,25 +1531,69 @@ class Converter {
 
   emitBindingDecl(decl) {
     const pat=decl.name;
-    const names=pat.elements.map(e=>e.name?.getText(this.sf) || e.getText(this.sf));
+    const names=pat.elements.map(e=>ts.isOmittedExpression(e)?null:(e.name?.getText(this.sf) || e.getText(this.sf)));
     const init=decl.initializer;
     if (!init) return `/* TODO binding */`;
-    if (this.isCall(init,'nextNums')||this.isCall(init,'nextBigInts')) {
-      const decls=[];
+
+    // let [a,b] = (await nextAwait()).split(" ").map(Number)
+    // Interactive AHC input is token based here, so lower directly to cin.
+    let isAwaitNumberLine=false;
+    if (ts.isCallExpression(init) && ts.isPropertyAccessExpression(init.expression) && init.expression.name.text==='map' && init.arguments.length===1 && ts.isIdentifier(init.arguments[0]) && init.arguments[0].text==='Number') {
+      const splitCall=init.expression.expression;
+      if (ts.isCallExpression(splitCall) && ts.isPropertyAccessExpression(splitCall.expression) && splitCall.expression.name.text==='split') {
+        let base=splitCall.expression.expression;
+        if (ts.isParenthesizedExpression(base)) base=base.expression;
+        if (ts.isAwaitExpression(base)) base=base.expression;
+        if (this.isCall(base,'nextAwait')) isAwaitNumberLine=true;
+      }
+    }
+    if (isAwaitNumberLine) {
+      const decls=[], reads=[];
       for (let i=0;i<names.length;i++) {
         const n=names[i];
+        if (n==null) { const tmp=`__ts2cpp_skip${this.tmpId++}`; decls.push(`ll ${tmp};`); reads.push(tmp); continue; }
         const be=pat.elements[i];
-        const id=be && ts.isIdentifier(be.name)?be.name:null;
+        const id=be && !ts.isOmittedExpression(be) && ts.isIdentifier(be.name)?be.name:null;
+        const t=id&&this.isRealIdentifier(id)?TypeInfo.real():TypeInfo.number();
+        this.env.set(n,t); decls.push(`${typeToCpp(t)} ${n};`); reads.push(n);
+      }
+      return `${decls.join(' ')} cin>>${reads.join('>>')};`;
+    }
+
+    if (this.isCall(init,'nextNums')||this.isCall(init,'nextBigInts')) {
+      const decls=[], reads=[];
+      for (let i=0;i<names.length;i++) {
+        const n=names[i];
+        if (n==null) { const tmp=`__ts2cpp_skip${this.tmpId++}`; decls.push(`ll ${tmp};`); reads.push(tmp); continue; }
+        const be=pat.elements[i];
+        const id=be && !ts.isOmittedExpression(be) && ts.isIdentifier(be.name)?be.name:null;
         const t=id&&this.isRealIdentifier(id)?TypeInfo.real():TypeInfo.number();
         this.env.set(n,t);
-        decls.push(`${typeToCpp(t)} ${n};`);
+        decls.push(`${typeToCpp(t)} ${n};`); reads.push(n);
       }
-      return `${decls.join(' ')} cin>>${names.join('>>')};`;
+      return `${decls.join(' ')} cin>>${reads.join('>>')};`;
     }
     const initType=this.inferExpr(init);
-    if (initType.kind==='tuple') names.forEach((n,i)=>this.env.set(n,initType.elems[i]||TypeInfo.unknown()));
-    else if (initType.kind==='array'||initType.kind==='vector') names.forEach(n=>this.env.set(n,initType.elem));
-    else names.forEach(n=>this.env.set(n,TypeInfo.unknown()));
+    if (initType.kind==='tuple') names.forEach((n,i)=>{ if(n!=null) this.env.set(n,initType.elems[i]||TypeInfo.unknown()); });
+    else if (initType.kind==='array'||initType.kind==='vector') names.forEach(n=>{ if(n!=null) this.env.set(n,initType.elem); });
+    else names.forEach(n=>{ if(n!=null) this.env.set(n,TypeInfo.unknown()); });
+
+    // Omitted elements such as `let [,i] = ...` are not legal C++ structured bindings.
+    // Materialize the source once and copy only the requested indices.
+    if (names.some(n=>n==null)) {
+      const id=this.tmpId++;
+      const tmp=`__ts2cpp_bind${id}`;
+      const lines=[`auto&& ${tmp}=${this.emitExpr(init)};`];
+      for (let i=0;i<names.length;i++) {
+        const n=names[i]; if(n==null) continue;
+        let et=TypeInfo.unknown();
+        if (initType.kind==='tuple') et=initType.elems[i]||TypeInfo.unknown();
+        else if (initType.kind==='array'||initType.kind==='vector') et=initType.elem;
+        lines.push(`${et.kind==='unknown'?'auto':typeToCpp(et)} ${n}=${tmp}[${i}];`);
+      }
+      return lines.join(' ');
+    }
+
     if (ts.isArrayLiteralExpression(init) && init.elements.length===names.length) {
       return `auto [${names.join(',')}]=array{${init.elements.map(x=>this.emitExpr(x)).join(',')}};`;
     }
@@ -1639,7 +1762,10 @@ class Converter {
         const obj=this.emitExpr(e.expression.expression); return `reverse(${obj}.begin(),${obj}.end());`;
       }
       if (ts.isPropertyAccessExpression(e.expression) && e.expression.name.text==='pop') {
-        const obj=this.emitExpr(e.expression.expression); return `${obj}.pop_back();`;
+        const bt=this.inferExpr(e.expression.expression);
+        const obj=this.emitExpr(e.expression.expression);
+        if (bt.kind==='custom' && bt.name==='PriorityQueue') return `${obj}.pop();`;
+        return `${obj}.pop_back();`;
       }
       if (ts.isPropertyAccessExpression(e.expression) && e.expression.name.text==='set') {
         const obj=this.emitExpr(e.expression.expression); return `${obj}[${this.emitExpr(e.arguments[0])}]=${this.emitExpr(e.arguments[1])};`;
@@ -1763,7 +1889,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v23',
+      '// Generated by ts_main_to_cpp_v32',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',
@@ -1778,6 +1904,25 @@ class Converter {
     if (this.needHelpers.has('join_vec')) hs.push('',`template<class T> string join_vec(const vector<T>& a,const string& sep){ ostringstream os; for(size_t i=0;i<a.size();i++){ if(i)os<<sep; os<<a[i]; } return os.str(); }`);
     if (this.needHelpers.has('to_string_any')) hs.push('',`inline string to_string_any(const string& x){ return x; } inline string to_string_any(const char* x){ return string(x); } inline string to_string_any(char x){ return string(1,x); } inline string to_string_any(bool x){ return x?"true":"false"; } template<class T> string to_string_any(const T& x){ ostringstream os; os<<x; return os.str(); }`);
     if (this.needHelpers.has('number_any')) hs.push('',`inline double ts_number_any(const string& s){ if(s.empty()) return 0.0; char* e=nullptr; double v=strtod(s.c_str(),&e); if(e==s.c_str()) return numeric_limits<double>::quiet_NaN(); while(*e && isspace((unsigned char)*e)) ++e; if(*e) return numeric_limits<double>::quiet_NaN(); return v; } inline double ts_number_any(char c){ char s[2]={c,0}; return ts_number_any(string(s)); } inline double ts_number_any(bool x){ return x?1.0:0.0; } template<class T,enable_if_t<is_arithmetic_v<T>,int> =0> double ts_number_any(T x){ return (double)x; }`);
+    if (this.needHelpers.has('union_find')) hs.push('',`struct UnionFind{
+  vector<int> p,s;
+  explicit UnionFind(int n):p(n),s(n,1){ iota(p.begin(),p.end(),0); }
+  int root(int x){ return p[x]==x?x:p[x]=root(p[x]); }
+  bool connect(int a,int b){ a=root(a); b=root(b); if(a==b) return false; if(s[a]<s[b]) swap(a,b); p[b]=a; s[a]+=s[b]; return true; }
+  bool same(int a,int b){ return root(a)==root(b); }
+  int size(int x){ return s[root(x)]; }
+};`);
+    if (this.needHelpers.has('priority_queue')) hs.push('',`template<class T> struct TsPriorityQueue{
+  function<double(const T&,const T&)> cmp;
+  vector<T> h;
+  template<class F> explicit TsPriorityQueue(F f):cmp(f){}
+  bool better(const T& a,const T& b) const{ return cmp(a,b)<0; }
+  void push(T x){ h.push_back(move(x)); int i=(int)h.size()-1; while(i){ int p=(i-1)/2; if(!better(h[i],h[p])) break; swap(h[i],h[p]); i=p; } }
+  T pop(){ T r=move(h[0]); if(h.size()==1){ h.pop_back(); return r; } h[0]=move(h.back()); h.pop_back(); int i=0; while(true){ int l=i*2+1,rn=l+1,b=i; if(l<(int)h.size()&&better(h[l],h[b])) b=l; if(rn<(int)h.size()&&better(h[rn],h[b])) b=rn; if(b==i) break; swap(h[i],h[b]); i=b; } return r; }
+  const T& top() const{ return h[0]; }
+  bool empty() const{ return h.empty(); }
+  size_t size() const{ return h.size(); }
+};`);
     if (this.needHelpers.has('ahc_timer')) hs.push('',`struct Timer{
   using Clock=chrono::steady_clock;
   Clock::time_point startTime;
@@ -1850,9 +1995,23 @@ function templateExtraHelpers(needHelpers) {
   if (needHelpers.has('join_vec')) hs.push(`template<class T> string join_vec(const vector<T>& a,const string& sep){ ostringstream os; for(size_t i=0;i<a.size();i++){ if(i)os<<sep; os<<a[i]; } return os.str(); }`);
   if (needHelpers.has('to_string_any')) hs.push(`inline string to_string_any(const string& x){ return x; } inline string to_string_any(const char* x){ return string(x); } inline string to_string_any(char x){ return string(1,x); } inline string to_string_any(bool x){ return x?"true":"false"; } template<class T> string to_string_any(const T& x){ ostringstream os; os<<x; return os.str(); }`);
   if (needHelpers.has('number_any')) hs.push(`inline double ts_number_any(const string& s){ if(s.empty()) return 0.0; char* e=nullptr; double v=strtod(s.c_str(),&e); if(e==s.c_str()) return numeric_limits<double>::quiet_NaN(); while(*e && isspace((unsigned char)*e)) ++e; if(*e) return numeric_limits<double>::quiet_NaN(); return v; } inline double ts_number_any(char c){ char s[2]={c,0}; return ts_number_any(string(s)); } inline double ts_number_any(bool x){ return x?1.0:0.0; } template<class T,enable_if_t<is_arithmetic_v<T>,int> =0> double ts_number_any(T x){ return (double)x; }`);
+  if (needHelpers.has('union_find')) hs.push(`struct UnionFind{ vector<int> p,s; explicit UnionFind(int n):p(n),s(n,1){ iota(p.begin(),p.end(),0); } int root(int x){ return p[x]==x?x:p[x]=root(p[x]); } bool connect(int a,int b){ a=root(a); b=root(b); if(a==b)return false; if(s[a]<s[b])swap(a,b); p[b]=a; s[a]+=s[b]; return true; } bool same(int a,int b){ return root(a)==root(b); } int size(int x){ return s[root(x)]; } };`);
+  if (needHelpers.has('priority_queue')) hs.push(`template<class T> struct TsPriorityQueue{ function<double(const T&,const T&)> cmp; vector<T> h; template<class F> explicit TsPriorityQueue(F f):cmp(f){} bool better(const T&a,const T&b)const{return cmp(a,b)<0;} void push(T x){h.push_back(move(x));int i=(int)h.size()-1;while(i){int p=(i-1)/2;if(!better(h[i],h[p]))break;swap(h[i],h[p]);i=p;}} T pop(){T r=move(h[0]);if(h.size()==1){h.pop_back();return r;}h[0]=move(h.back());h.pop_back();int i=0;while(true){int l=i*2+1,rn=l+1,b=i;if(l<(int)h.size()&&better(h[l],h[b]))b=l;if(rn<(int)h.size()&&better(h[rn],h[b]))b=rn;if(b==i)break;swap(h[i],h[b]);i=b;}return r;} const T& top()const{return h[0];} bool empty()const{return h.empty();} size_t size()const{return h.size();} };`);
   if (needHelpers.has('date_now')) hs.push(`inline long long ts2cpp_date_now(){ using namespace chrono; return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count(); }`);
   // Timer/RNG/Annealing/seedFromClock are intentionally omitted: the AHC C++ template owns them.
   return hs.join('\n\n');
+}
+
+function detectCppTemplateCapabilities(templateText) {
+  return {
+    dsu:/\bstruct\s+DSU\b/.test(templateText),
+    minpq:/template\s*<\s*class\s+T\s*>\s*using\s+minpq\b/.test(templateText),
+    maxpq:/template\s*<\s*class\s+T\s*>\s*using\s+maxpq\b/.test(templateText),
+    timer:/\bstruct\s+Timer\b/.test(templateText),
+    rng:/\bstruct\s+RNG\b/.test(templateText),
+    annealing:/\bstruct\s+Annealing\b/.test(templateText),
+    monteCarlo:/\bstruct\s+MonteCarlo\b/.test(templateText)
+  };
 }
 
 function applyCppTemplate(templateText, convertedMainBlock, needHelpers) {
@@ -1866,6 +2025,7 @@ function applyCppTemplate(templateText, convertedMainBlock, needHelpers) {
   if (templateText.includes('to_string_any(const string&')) filtered.delete('to_string_any');
   if (templateText.includes('ts_number_any(const string&')) filtered.delete('number_any');
   if (templateText.includes('ts2cpp_date_now()')) filtered.delete('date_now');
+  if (/\bstruct\s+DSU\b/.test(templateText)) filtered.delete('union_find');
   const extra=templateExtraHelpers(filtered);
   const block=(extra?extra+'\n\n':'')+convertedMainBlock.trimEnd();
   return templateText.slice(0,l)+block+templateText.slice(r);
@@ -1873,14 +2033,15 @@ function applyCppTemplate(templateText, convertedMainBlock, needHelpers) {
 
 const args=parseArgs(process.argv.slice(2));
 const src=args.input ? fs.readFileSync(args.input,'utf8') : fs.readFileSync(0,'utf8');
-const conv=new Converter(src,args.input||'stdin.ts',args);
+const cppBase=args.cppTemplate ? fs.readFileSync(args.cppTemplate,'utf8') : null;
+const templateCaps=cppBase ? detectCppTemplateCapabilities(cppBase) : {};
+const conv=new Converter(src,args.input||'stdin.ts',{...args,templateCaps});
 let out;
 if (args.cppTemplate) {
   if (args.mode!=='full') throw new Error('--cpp-template cannot be combined with --main-only/--body-only');
   // Render once to populate helper requirements, then place only dependencies+main into the user's AHC template.
   conv.render('full');
   const mainBlock=conv.render('main-bare');
-  const cppBase=fs.readFileSync(args.cppTemplate,'utf8');
   out=applyCppTemplate(cppBase,mainBlock,conv.needHelpers);
 } else {
   out=conv.render(args.mode);

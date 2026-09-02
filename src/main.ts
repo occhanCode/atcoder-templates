@@ -5,7 +5,39 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
-  
+  let N = nextNum();
+  let ABC = Array.from({length: N},() => nextNums(3).sort(less));
+  ABC.sort((a,b) => {
+    if (a[0] != b[0]) return a[0]-b[0];
+    return a[1]-b[1];
+  });
+  let cc = new CoordinateCompression(ABC.map(v => v[1]));
+  let arr = Array(cc.size()+1).fill(Infinity);
+  let seg = new Segtree<number>(arr,{
+    op: (a,b) => Math.min(a,b),
+    e: () => Infinity
+  });
+  let i = 0;
+  while (i < N) {
+    let j = i;
+    while (j < N && ABC[j][0] == ABC[i][0]) j++;
+    for (let k = i; k < j; k++) {
+      let [A,B,C] = ABC[k];
+      let idx = cc.index(B);
+      if (seg.query(0,idx) < C) {
+        print(yes);
+        return;
+      }
+    }
+    for (let k = i; k < j; k++) {
+      let [A,B,C] = ABC[k];
+      let idx = cc.index(B);
+      arr[idx] = Math.min(arr[idx],C);
+      seg.set(idx,arr[idx]);
+    }
+    i = j;
+  }
+  print(no);
 
   // 処理終了
 }
@@ -569,7 +601,7 @@ function convolution(a: Array<number>, b: Array<number>, MOD: number): Array<num
   let butterfly = (arr: any) => {
     initNTT();
     const nn = arr.length;
-    const h = 31 - Math.clz32(nn);    
+    const h = 31 - Math.clz32(nn);
     for (let ph = 1; ph <= h; ph++) {
       let w = 1 << (ph - 1), p = 1 << (h - ph);
       let now = 1;
@@ -1432,7 +1464,7 @@ function dijkstraRestoreEdge(
  *
  * メモリ:
  *   O(N^2)
- * 
+ *
  * 用例: ABC369-E
  */
 function floydWarshall(
@@ -2830,7 +2862,7 @@ class Segtree<S> {
     this.treeCapacity = bit_ceil(this.leafCount);
     this.treeHeight = countr_zero(this.treeCapacity);
     this.data = new Array(2 * this.treeCapacity);
-    
+
     for (let i = 0; i < this.data.length; i++) {
       this.data[i] = this.identityElement();
     }
@@ -3652,14 +3684,23 @@ class Rerooting<T> {
  * 用例: ABC294-G
  */
 class HeavyLightDecomposition {
+  // 頂点数
   public readonly n: number;
+  // 隣接リスト。build後は親が除かれ子頂点のみを持つ
   public readonly g: number[][];
+  // parent[v]: vの親。根は-1
   public readonly parent: Int32Array;
+  // depth[v]: 根からvまでの辺数
   public readonly depth: Int32Array;
+  // sz[v]: vを根とする部分木の頂点数
   public readonly sz: Int32Array;
+  // head[v]: vが属するHeavyPathの最上位頂点
   public readonly head: Int32Array;
+  // in[v]: EulerTour上でのvの行きがけ番号
   public readonly in: Int32Array;
+  // out[v]: vの部分木区間の右端（半区間[in[v],out[v])）
   public readonly out: Int32Array;
+  // rev[i]: EulerTour番号iに対応する元の頂点番号
   public readonly rev: Int32Array;
 
   /**
@@ -3697,7 +3738,7 @@ class HeavyLightDecomposition {
   build(root: number = 0): void {
     const order = new Int32Array(this.n);
     let head_queue = 0, tail_queue = 0;
-    
+
     order[tail_queue++] = root;
     this.parent[root] = -1;
     this.depth[root] = 0;
@@ -3748,7 +3789,7 @@ class HeavyLightDecomposition {
     const stack = new Int32Array(this.n);
     const edge_ptr = new Int32Array(this.n);
     let ptr = 0;
-    
+
     stack[ptr++] = root;
     this.head[root] = root;
 
@@ -3794,6 +3835,42 @@ class HeavyLightDecomposition {
    */
   distance(u: number, v: number): number {
     return this.depth[u] + this.depth[v] - 2 * this.depth[this.lca(u, v)];
+  }
+
+  /**
+   * 説明: 頂点 u から親方向へ k 辺進んだ頂点を返す。存在しなければ -1
+   * 使い方: hld.kthAncestor(u,k)
+   * 計算量: O(log N)
+   */
+  kthAncestor(u: number, k: number): number {
+    if (k < 0 || k > this.depth[u]) return -1;
+    while (true) {
+      let h = this.head[u];
+      let d = this.depth[u]-this.depth[h];
+      if (k <= d) {
+        return this.rev[this.in[u]-k];
+      }
+      k -= d+1;
+      u = this.parent[h];
+    }
+  }
+
+  /**
+   * 説明: u から v への単純パス上で、u から k 辺進んだ頂点を返す。
+   *       u 自身を k=0 とする。パス長を超える場合は -1
+   * 使い方: hld.jump(u,v,k)
+   * 計算量: O(log N)
+   * 用例: ABC267-F
+   */
+  jump(u: number, v: number, k: number): number {
+    let l = this.lca(u,v);
+    let du = this.depth[u]-this.depth[l];
+    let dv = this.depth[v]-this.depth[l];
+    if (k < 0 || k > du+dv) return -1;
+    if (k <= du) {
+      return this.kthAncestor(u,k);
+    }
+    return this.kthAncestor(v,du+dv-k);
   }
 
   /**
@@ -3886,7 +3963,7 @@ type LowLinkEdge = {
  *
  * 計算量:
  *   build O(N+M)
- * 
+ *
  * 用例: ABC375-G
  */
 class LowLink {
@@ -4752,6 +4829,8 @@ type TreeDiameterSearchResult = {
  *   addEdge O(1)
  *   getFarthest O(N)
  *   build O(N)
+ * 
+ * 用例: ABC267-F
  */
 class TreeDiameter {
   G: TreeDiameterEdge[][];
@@ -6668,7 +6747,7 @@ function lcp_array(s: any, sa: any) {
  * 使い方:
  * zAlgorithm("ababa")
  * // [5,0,3,0,1]
- * 
+ *
  * 用例: ABC257-G
  */
 function zAlgorithm(s: string): number[] {
@@ -6702,7 +6781,7 @@ function zAlgorithm(s: string): number[] {
 class RollingHash {
   static readonly MOD: bigint = (1n << 61n) - 1n;
   static base: bigint = 0n;
-  
+
   // 複数インスタンスで使い回すための累乗配列
   static power: BigUint64Array = new BigUint64Array(1).fill(1n);
 
@@ -6728,10 +6807,10 @@ class RollingHash {
     if (this.power.length > size) return;
     let newLen = this.power.length;
     while (newLen <= size) newLen *= 2;
-    
+
     const newPower = new BigUint64Array(newLen);
     newPower.set(this.power);
-    
+
     for (let i = this.power.length; i < newLen; i++) {
       // (a * b) % (2^61 - 1) をビット演算で高速化
       const t = newPower[i - 1] * this.base;
@@ -6756,7 +6835,7 @@ class RollingHash {
     for (let i = 0; i < n; i++) {
       const c = typeof s === "string" ? BigInt(s.charCodeAt(i)) : BigInt(s[i]);
       const t = this.hash[i] * RollingHash.base + c;
-      
+
       // (a * b + c) % (2^61 - 1) をビット演算で高速化
       let res = (t >> 61n) + (t & RollingHash.MOD);
       if (res >= RollingHash.MOD) res -= RollingHash.MOD;
@@ -6847,7 +6926,7 @@ class Mo {
 
   /**
    * 登録されたクエリを最適な順序で並び替え、処理を実行します。
-   * 
+   *
    * @param add_left    区間の左端を拡張する処理 ( l を l-1 にする )
    * @param add_right   区間の右端を拡張する処理 ( r を r+1 にする )
    * @param erase_left  区間の左端を縮小する処理 ( l を l+1 にする )
@@ -6866,7 +6945,7 @@ class Mo {
 
     // ブロックサイズ B = N / √Q
     const B = Math.max(1, Math.floor(this.N / Math.sqrt(Q)));
-    
+
     // クエリの元のインデックスを保持する配列
     const order = new Int32Array(Q);
     for (let i = 0; i < Q; i++) order[i] = i;
@@ -6875,10 +6954,10 @@ class Mo {
     order.sort((a, b) => {
       const block_a = Math.floor(this.lefts[a] / B);
       const block_b = Math.floor(this.lefts[b] / B);
-      
+
       // 1. 左端が属するブロックが違うなら、ブロック順にソート
       if (block_a !== block_b) return block_a - block_b;
-      
+
       // 2. 左端が同じブロックなら、右端でソート
       // 【最適化】ブロックが偶数番目なら昇順、奇数番目なら降順にすることで、
       // 次のブロックへ移る際の右端(R)の無駄な戻りをなくす
@@ -7285,7 +7364,7 @@ class DigitDP {
    *
    * 計算量:
    *   O(桁数 × 状態数 × base)
-   * 
+   *
    * 用例: ABC336-E
    */
   count(
@@ -8697,7 +8776,7 @@ class AhoCorasick {
  *   get O(1)
  *   equals O(1)
  *   メモリ O(N)
- * 
+ *
  * 用例: ABC367-F
  */
 class RangeMultisetHash {
@@ -8824,7 +8903,7 @@ class RangeMultisetHash {
  *   build O(N)
  *   各区間比較 O(1)
  *   値の種類数をVとして内部メモリ O(V)
- * 
+ *
  * 用例: ABC367-F
  */
 class MultisetHasher {
@@ -8921,7 +9000,7 @@ class MultisetHasher {
  *
  * メモリ:
  *   O(maxN)
- * 
+ *
  * 用例: ABC368-F
  */
 class SmallestPrimeFactor {
@@ -8974,7 +9053,7 @@ class SmallestPrimeFactor {
    *
    * 計算量:
    *   O(1)
-   * 
+   *
    * 用例: ABC368-F
    */
   primeFactorCount(n: number): number {
@@ -10445,7 +10524,7 @@ type MonteCarloResult<C> = {
  *   rollout 内では追加の乱数を生成せず、
  *   必要な乱数は makeScenario 側でまとめて生成する。
  *   scenario は全候補で共有するため、rollout 内で変更しない。
- * 
+ *
  * 用例: AHC015
  */
 class MonteCarlo {
@@ -10672,7 +10751,7 @@ class MonteCarlo {
  *   hash衝突は理論上あり得る。AHCでは通常64bitで十分。
  *   TypeScriptでは64bitを正確に扱うためbigintを使用する。
  *   C++版とは乱数表そのものは一致しなくてもよく、状態一致判定には影響しない。
- * 
+ *
  * 用例: AHC021
  */
 class ZobristHash {
@@ -10780,7 +10859,7 @@ type BeamResult<S> = {
  *   その場合は問題専用のapply/rollback型やEuler Tour Beam Searchへ移行する。
  *   deduplicate=true の場合、同じhashの候補は評価値が良い方だけ残す。
  *   hash衝突は同一状態として扱われる。
- * 
+ *
  * 用例: AHC021
  */
 class BeamSearch {

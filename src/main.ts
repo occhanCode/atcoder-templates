@@ -5,39 +5,7 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
-  let N = nextNum();
-  let ABC = Array.from({length: N},() => nextNums(3).sort(less));
-  ABC.sort((a,b) => {
-    if (a[0] != b[0]) return a[0]-b[0];
-    return a[1]-b[1];
-  });
-  let cc = new CoordinateCompression(ABC.map(v => v[1]));
-  let arr = Array(cc.size()+1).fill(Infinity);
-  let seg = new Segtree<number>(arr,{
-    op: (a,b) => Math.min(a,b),
-    e: () => Infinity
-  });
-  let i = 0;
-  while (i < N) {
-    let j = i;
-    while (j < N && ABC[j][0] == ABC[i][0]) j++;
-    for (let k = i; k < j; k++) {
-      let [A,B,C] = ABC[k];
-      let idx = cc.index(B);
-      if (seg.query(0,idx) < C) {
-        print(yes);
-        return;
-      }
-    }
-    for (let k = i; k < j; k++) {
-      let [A,B,C] = ABC[k];
-      let idx = cc.index(B);
-      arr[idx] = Math.min(arr[idx],C);
-      seg.set(idx,arr[idx]);
-    }
-    i = j;
-  }
-  print(no);
+  
 
   // 処理終了
 }
@@ -4599,25 +4567,36 @@ class TwoSAT {
  * 計算量: 構築 O(N)、doubling 構築 O(N log K)、jump O(log K)
  */
 class FunctionalGraph {
+  // to[v]: 頂点vから1回遷移した先
   to: number[];
+  // 頂点数
   n: number;
+  // rev[v]: vへ直接遷移してくる頂点一覧
   rev: number[][];
+  // indeg[v]: vの入次数。rev[v].lengthと同じ
   indeg: number[];
-
+  // isCycle[v]: v自身がサイクル上にあるならtrue
   isCycle: boolean[];
+  // cycleId[v]: vが最終的に到達するサイクルの番号。cycles[cycleId[v]]がそのサイクル
   cycleId: number[];
+  // cyclePos[v]: vがサイクル上にある場合cycles[cycleId[v]]の何番目か。サイクル外は-1
   cyclePos: number[];
+  // cycleSize[v]: vが最終的に到達するサイクルの頂点数。サイクル外も設定される
   cycleSize: number[];
+  // dist[v]: vからサイクルへ入るまでに必要な遷移回数。サイクル上なら0
   dist: number[];
+  // enter[v]: vからtoを辿ったとき最初に到達するサイクル頂点。v自身がサイクル上ならenter[v] == v
   enter: number[];
+  // cycles[id]: id番目のサイクルの頂点列。toの向きにcycles[id][0]->cycles[id][1]->...と並んでいる
   cycles: number[][];
-
+  // up[k][v]: vから2^k回遷移した先。buildDoubling()を読んだ後に使用可能（jump(v,k)用）
   up: number[][];
 
   /**
    * 説明: to[i] へ進む functional graph を構築・解析する
    * 使い方: new FunctionalGraph(to)
    * 計算量: O(N)
+   * 用例: ABC387-F
    */
   constructor(to: any) {
     this.to = to;

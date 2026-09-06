@@ -5,7 +5,6 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
-  
 
   // 処理終了
 }
@@ -365,6 +364,466 @@ function bigint_mod_pow(x: bigint, n: bigint, p: bigint) {
     if (n&1n) r = r*x%p;
   }
   return r;
+}
+
+// ========================================
+// Fast Unsigned 64-bit Integer Utilities
+// ========================================
+// 説明:
+//   JavaScript の BigInt を高頻度ループから追い出すための
+//   unsigned 64bit 整数ユーティリティ。
+// 
+//   値 x を
+//     x = hi * 2^32 + lo
+//   として、hi,lo を unsigned 32bit number で保持する。
+// 
+// 主な用途:
+//   - 1e18 級整数の比較
+//   - XOR
+//   - 加減算
+//   - uint32 * uint32 の正確な64bit積
+//   - PriorityQueue のキー
+//   - BigInt Set の代わりの高速HashSet
+//
+// 注意:
+//   signed 64bit ではなく unsigned 64bit。
+//   0 <= x < 2^64 を対象とする。
+
+type U64 = [number,number];
+
+const U64_BASE = 4294967296;
+const U64_MASK_BIGINT = 0xffffffffn;
+const U64_LIMIT_BIGINT = 1n<<64n;
+
+/**
+ * bigint -> U64
+ * 計算量 O(1)
+ */
+function u64FromBigInt(x: bigint): U64 {
+  if (x < 0n || x >= U64_LIMIT_BIGINT) {
+    throw new RangeError("u64FromBigInt: out of uint64 range");
+  }
+  return [
+    Number(x>>32n),
+    Number(x&U64_MASK_BIGINT)
+  ];
+}
+
+/**
+ * safe integer number -> U64
+ * 計算量 O(1)
+ */
+function u64FromNumber(x: number): U64 {
+  if (!Number.isSafeInteger(x) || x < 0) {
+    throw new RangeError(
+      "u64FromNumber: x must be a non-negative safe integer"
+    );
+  }
+  return [
+    Math.floor(x/U64_BASE)>>>0,
+    x>>>0
+  ];
+}
+
+/**
+ * U64 -> bigint
+ *
+ * 出力時など、低頻度で使うことを想定。
+ * 計算量 O(1)
+ * 
+ * 用例: ABC391-F
+ */
+function u64ToBigInt(hi: number,lo: number): bigint {
+  return (
+    (BigInt(hi>>>0)<<32n)
+    +BigInt(lo>>>0)
+  );
+}
+
+/**
+ * U64 -> number
+ *
+ * Number.MAX_SAFE_INTEGER 以下でなければ例外。
+ * 計算量 O(1)
+ */
+function u64ToNumber(hi: number,lo: number): number {
+  let x = (hi>>>0)*U64_BASE+(lo>>>0);
+  if (!Number.isSafeInteger(x)) {
+    throw new RangeError("u64ToNumber: value exceeds safe integer range");
+  }
+  return x;
+}
+
+/**
+ * unsigned 64bit 比較
+ *
+ * 戻り値:
+ *   a < b : -1
+ *   a = b :  0
+ *   a > b :  1
+ *
+ * 計算量 O(1)
+ * 
+ * 用例: ABC391-F
+ */
+function u64Cmp(
+  ah: number,
+  al: number,
+  bh: number,
+  bl: number
+): number {
+  ah >>>= 0;
+  al >>>= 0;
+  bh >>>= 0;
+  bl >>>= 0;
+  if (ah != bh) return ah < bh ? -1 : 1;
+  if (al != bl) return al < bl ? -1 : 1;
+  return 0;
+}
+
+/**
+ * unsigned 64bit 等値判定
+ */
+function u64Eq(
+  ah: number,
+  al: number,
+  bh: number,
+  bl: number
+): boolean {
+  return (
+    (ah>>>0) == (bh>>>0)
+    &&
+    (al>>>0) == (bl>>>0)
+  );
+}
+
+/**
+ * unsigned 64bit 加算
+ *
+ * 2^64 を超えた分は捨てる。
+ * 計算量 O(1)
+ */
+function u64Add(
+  ah: number,
+  al: number,
+  bh: number,
+  bl: number
+): U64 {
+  ah >>>= 0;
+  al >>>= 0;
+  bh >>>= 0;
+  bl >>>= 0;
+  let sumLo = al+bl;
+  let lo = sumLo>>>0;
+  let hi = (
+    ah
+    +bh
+    +(sumLo >= U64_BASE ? 1 : 0)
+  )>>>0;
+  return [hi,lo];
+}
+
+/**
+ * unsigned 64bit 減算
+ *
+ * a >= b を想定。
+ * a < b の場合は 2^64 を法としてwrapする。
+ * 計算量 O(1)
+ */
+function u64Sub(
+  ah: number,
+  al: number,
+  bh: number,
+  bl: number
+): U64 {
+  ah >>>= 0;
+  al >>>= 0;
+  bh >>>= 0;
+  bl >>>= 0;
+  let borrow = al < bl ? 1 : 0;
+  let lo = (al-bl)>>>0;
+  let hi = (ah-bh-borrow)>>>0;
+  return [hi,lo];
+}
+
+/**
+ * unsigned 64bit XOR
+ * 計算量 O(1)
+ */
+function u64Xor(
+  ah: number,
+  al: number,
+  bh: number,
+  bl: number
+): U64 {
+  return [
+    (ah^bh)>>>0,
+    (al^bl)>>>0
+  ];
+}
+
+/**
+ * uint32 * uint32 を正確な uint64 にする。
+ *
+ * a,b は 0 <= a,b < 2^32。
+ *
+ * JavaScript number で a*b を直接計算すると
+ * 2^53 を超えて整数精度を失う可能性があるため、
+ * 16bit ずつに分割して計算する。
+ *
+ * 計算量 O(1)
+ * 
+ * 用例: ABC391-F
+ */
+function u64MulU32(a: number,b: number): U64 {
+  a >>>= 0;
+  b >>>= 0;
+  let a0 = a&0xffff;
+  let a1 = a>>>16;
+  let b0 = b&0xffff;
+  let b1 = b>>>16;
+  let mid = a1*b0+a0*b1;
+  let t =
+    a0*b0
+    +(mid&0xffff)*65536;
+  let lo = t>>>0;
+  let hi = (
+    a1*b1
+    +Math.floor(mid/65536)
+    +Math.floor(t/U64_BASE)
+  )>>>0;
+  return [hi,lo];
+}
+
+/**
+ * U64 + uint32*uint32
+ *
+ * 積を別途BigIntにせず加算する。
+ * 計算量 O(1)
+ */
+function u64AddMulU32(
+  hi: number,
+  lo: number,
+  a: number,
+  b: number
+): U64 {
+  a >>>= 0;
+  b >>>= 0;
+  let a0 = a&0xffff;
+  let a1 = a>>>16;
+  let b0 = b&0xffff;
+  let b1 = b>>>16;
+  let mid = a1*b0+a0*b1;
+  let t =
+    a0*b0
+    +(mid&0xffff)*65536;
+  let mlo = t>>>0;
+  let mhi = (
+    a1*b1
+    +Math.floor(mid/65536)
+    +Math.floor(t/U64_BASE)
+  )>>>0;
+  let sumLo = (lo>>>0)+mlo;
+  return [
+    (
+      (hi>>>0)
+      +mhi
+      +(sumLo >= U64_BASE ? 1 : 0)
+    )>>>0,
+    sumLo>>>0
+  ];
+}
+
+
+// ========================================
+// U64 Hash Set
+// ========================================
+// 説明:
+//   Set<bigint> が重い場合に使う。
+//   open addressing + linear probing。
+//
+//   hi,lo を Uint32Array に保存し、
+//   used を Uint8Array で管理する。
+//
+// 使い方:
+//   let set = new U64HashSet(4_300_000);
+//   set.add(hi,lo);
+//   set.has(hi,lo);
+//   set.size;
+//
+// 計算量:
+//   平均 add/has O(1)
+//
+// 注意:
+//   expectedSize を大きく超えて追加しないこと。
+
+class U64HashSet {
+  private cap: number;
+  private mask: number;
+
+  private hi: Uint32Array;
+  private lo: Uint32Array;
+  private used: Uint8Array;
+
+  private _size = 0;
+
+  constructor(expectedSize = 16) {
+    let cap = 1;
+    // load factor をおよそ 0.7 以下にする
+    while (cap*0.7 < expectedSize) {
+      cap *= 2;
+    }
+    this.cap = cap;
+    this.mask = cap-1;
+    this.hi = new Uint32Array(cap);
+    this.lo = new Uint32Array(cap);
+    this.used = new Uint8Array(cap);
+  }
+
+  get size(): number {
+    return this._size;
+  }
+
+  private hash(h: number,l: number): number {
+    h >>>= 0;
+    l >>>= 0;
+    let x = (
+      Math.imul(
+        (l^(l>>>16))>>>0,
+        0x85ebca6b
+      )
+      ^
+      Math.imul(
+        (h^(h>>>16))>>>0,
+        0xc2b2ae35
+      )
+    )>>>0;
+    x ^= x>>>16;
+    return x>>>0;
+  }
+
+  has(h: number,l: number): boolean {
+    h >>>= 0;
+    l >>>= 0;
+    let p = this.hash(h,l)&this.mask;
+    while (this.used[p]) {
+      if (
+        this.hi[p] == h
+        &&
+        this.lo[p] == l
+      ) {
+        return true;
+      }
+      p = (p+1)&this.mask;
+    }
+
+    return false;
+  }
+
+  /**
+   * 新しく追加されたならtrue、
+   * すでに存在していたならfalse。
+   */
+  add(h: number,l: number): boolean {
+    h >>>= 0;
+    l >>>= 0;
+    let p = this.hash(h,l)&this.mask;
+    while (this.used[p]) {
+      if (
+        this.hi[p] == h
+        &&
+        this.lo[p] == l
+      ) {
+        return false;
+      }
+      p = (p+1)&this.mask;
+    }
+    this.used[p] = 1;
+    this.hi[p] = h;
+    this.lo[p] = l;
+    this._size++;
+    return true;
+  }
+}
+
+
+// ========================================
+// Large Exact Sum
+// ========================================
+// 説明:
+//   1回ごとの加算値は safe integer だが、
+//   累積結果だけ Number.MAX_SAFE_INTEGER を超える場合に使う。
+//
+//   例:
+//     ABC384-G の答え累積など。
+//
+//   内部表現:
+//     value = hi * 1e9 + lo
+//
+//   add() 内ではBigIntを使わず、
+//   最後に toBigInt() したときだけBigIntを使う。
+//
+// 注意:
+//   hi 自体が safe integer を超えない範囲を想定。
+//   通常のAtCoder 1e18〜1e21程度なら十分。
+
+class LargeIntSum {
+  private static readonly BASE = 1e9;
+
+  private hi = 0;
+  private lo = 0;
+
+  constructor(initial = 0) {
+    this.add(initial);
+  }
+
+  /**
+   * safe integer を加算する。
+   * 負数も可。
+   */
+  add(x: number): void {
+    if (!Number.isSafeInteger(x)) {
+      throw new RangeError(
+        "LargeIntSum.add: x must be a safe integer"
+      );
+    }
+    this.lo += x;
+    let q = Math.trunc(
+      this.lo/LargeIntSum.BASE
+    );
+    this.hi += q;
+    this.lo -= q*LargeIntSum.BASE;
+  }
+
+  sub(x: number): void {
+    this.add(-x);
+  }
+
+  /**
+   * 最後の出力時などに使用。
+   */
+  toBigInt(): bigint {
+    return (
+      BigInt(this.hi)
+      *1000000000n
+      +BigInt(this.lo)
+    );
+  }
+
+  /**
+   * safe integer 範囲なら number を返す。
+   */
+  toNumber(): number {
+    let x =
+      this.hi*LargeIntSum.BASE
+      +this.lo;
+    if (!Number.isSafeInteger(x)) {
+      throw new RangeError(
+        "LargeIntSum.toNumber: value exceeds safe integer range"
+      );
+    }
+    return x;
+  }
 }
 
 /**

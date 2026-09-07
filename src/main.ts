@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
+  
 
   // 処理終了
 }
@@ -1079,6 +1080,86 @@ function convolution(a: Array<number>, b: Array<number>, MOD: number): Array<num
     res[i] = a_pad[i].mul(iz);
   }
   return res;
+}
+
+/**
+ * 浮動小数 FFT
+ * 説明:
+ *   複素数列 re[i] + im[i] * i に対して FFT / 逆FFT を行う。
+ *   配列 re, im は破壊的に変更される。
+ *   NTT と違って剰余を使わず Float64 で計算するため高速だが、
+ *   浮動小数誤差が発生する。
+ * 主な用途:
+ *   - 0/1 配列など係数が小さい多項式の畳み込み
+ *   - 自己畳み込み
+ *   - 最終結果を Math.round() で整数へ戻せる問題
+ * 注意:
+ *   - re.length == im.length であること
+ *   - 配列長は 2 のべき乗であること
+ *   - 厳密な mod 畳み込みが必要な場合は既存 convolution() を使う
+ * @param re 複素数の実部
+ * @param im 複素数の虚部
+ * @param inv false: 順変換, true: 逆変換
+ * 計算量:
+ *   O(N log N)
+ * 用例: ABC392-G
+ */
+function fft(
+  re: Float64Array,
+  im: Float64Array,
+  inv: boolean
+) {
+  let N = re.length;
+  for (let i = 1,j = 0; i < N; i++) {
+    let bit = N>>1;
+    while (j&bit) {
+      j ^= bit;
+      bit >>= 1;
+    }
+    j ^= bit;
+    if (i < j) {
+      let t = re[i];
+      re[i] = re[j];
+      re[j] = t;
+      t = im[i];
+      im[i] = im[j];
+      im[j] = t;
+    }
+  }
+  for (let len = 2; len <= N; len <<= 1) {
+    let ang = 2*Math.PI/len*(inv ? -1 : 1);
+    let baseR = Math.cos(ang);
+    let baseI = Math.sin(ang);
+    let half = len>>1;
+    for (let l = 0; l < N; l += len) {
+      let wr = 1;
+      let wi = 0;
+      for (let j = 0; j < half; j++) {
+        let p = l+j;
+        let q = p+half;
+        let ar = re[p];
+        let ai = im[p];
+        let br = re[q];
+        let bi = im[q];
+        let vr = br*wr-bi*wi;
+        let vi = br*wi+bi*wr;
+        re[p] = ar+vr;
+        im[p] = ai+vi;
+        re[q] = ar-vr;
+        im[q] = ai-vi;
+        let nwr = wr*baseR-wi*baseI;
+        wi = wr*baseI+wi*baseR;
+        wr = nwr;
+      }
+    }
+  }
+  if (inv) {
+    let r = 1/N;
+    for (let i = 0; i < N; i++) {
+      re[i] *= r;
+      im[i] *= r;
+    }
+  }
 }
 
 /**

@@ -9,9 +9,9 @@
  *   - Prefer valid, idiomatic C++17 and emit explicit warnings for semantics that cannot be proven.
  *
  * Usage:
- *   node ts_main_to_cpp_v32.mjs input.ts > main.cpp
- *   node ts_main_to_cpp_v32.mjs input.ts -o main.cpp --warnings
- *   cat input.ts | node ts_main_to_cpp_v32.mjs > main.cpp
+ *   node ts_main_to_cpp_v33.mjs input.ts > main.cpp
+ *   node ts_main_to_cpp_v33.mjs input.ts -o main.cpp --warnings
+ *   cat input.ts | node ts_main_to_cpp_v33.mjs > main.cpp
  */
 
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     else if (a==='--cpp-template') r.cppTemplate=argv[++i];
     else if (a==='--deps') r.deps=true;
     else if (a==='--no-deps') r.deps=false;
-    else if (a==='--version') { console.log('ts_main_to_cpp_v32 32.0.0'); process.exit(0); }
+    else if (a==='--version') { console.log('ts_main_to_cpp_v33 33.0.3'); process.exit(0); }
     else if (a==='--double') {
       const v=argv[++i]; if (!v) throw new Error('--double requires a variable name or comma-separated names');
       r.doubleNames.push(...v.split(',').map(x=>x.trim()).filter(Boolean));
@@ -57,7 +57,7 @@ function parseArgs(argv) {
     else if (a==='--main-only') r.mode='main';
     else if (a==='--body-only') r.mode='body';
     else if (a==='-h' || a==='--help') {
-      console.log('Usage: node ts_main_to_cpp_v32.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
+      console.log('Usage: node ts_main_to_cpp_v33.mjs [input.ts] [-o output.cpp] [--deps|--no-deps] [--double p,q] [--warnings] [--strict] [--check] [--stats] [--cpp-template template.cpp] [--main-only|--body-only]');
       process.exit(0);
     } else if (!r.input) r.input=a;
     else throw new Error(`Unknown argument: ${a}`);
@@ -89,13 +89,37 @@ class TypeInfo {
   static set(elem=TypeInfo.unknown()){ return new TypeInfo('set',{elem}); }
   static map(key=TypeInfo.unknown(), value=TypeInfo.unknown()){ return new TypeInfo('map',{key,value}); }
   static custom(name,opt={}){ return new TypeInfo('custom',{name,...opt}); }
+  static record(fields=[]){ return new TypeInfo('record',{fields,cppName:recordCppName(fields.map(x=>x.name))}); }
+  static fn(ret=TypeInfo.unknown()){ return new TypeInfo('function',{ret}); }
 }
 
+
+function recordCppName(names) {
+  let h=2166136261>>>0;
+  const s=names.join('\x1f');
+  for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619)>>>0; }
+  const stem=names.map(x=>x.replace(/[^A-Za-z0-9_]/g,'_')).join('_').slice(0,48)||'empty';
+  return `TsRecord_${stem}_${h.toString(16)}`;
+}
+
+function fullyKnownType(t) {
+  if(!t || t.kind==='unknown') return false;
+  if(['number','u64','real','char','bool','string'].includes(t.kind)) return true;
+  if(t.kind==='vector'||t.kind==='set') return fullyKnownType(t.elem);
+  if(t.kind==='array') return fullyKnownType(t.elem);
+  if(t.kind==='map') return fullyKnownType(t.key)&&fullyKnownType(t.value);
+  if(t.kind==='tuple') return t.elems.every(fullyKnownType);
+  if(t.kind==='record') return t.fields.every(f=>fullyKnownType(f.type));
+  if(t.kind==='custom') return true;
+  return false;
+}
 
 function sameType(a,b) {
   if (!a || !b || a.kind!==b.kind) return false;
   if (['number','u64','real','char','bool','string','unknown'].includes(a.kind)) return true;
   if (a.kind==='custom') return a.name===b.name && (a.name!=='PriorityQueue' || sameType(a.elem,b.elem));
+  if (a.kind==='function') return sameType(a.ret,b.ret);
+  if (a.kind==='record') return a.cppName===b.cppName && a.fields.length===b.fields.length && a.fields.every((f,i)=>f.name===b.fields[i].name&&sameType(f.type,b.fields[i].type));
   if (a.kind==='vector' || a.kind==='set') return sameType(a.elem,b.elem);
   if (a.kind==='array') return a.size===b.size && sameType(a.elem,b.elem);
   if (a.kind==='map') return sameType(a.key,b.key)&&sameType(a.value,b.value);
@@ -109,6 +133,10 @@ function mergeType(a,b) {
   if (sameType(a,b)) return a;
   if ((a.kind==='number'&&b.kind==='real')||(a.kind==='real'&&b.kind==='number')) return TypeInfo.real();
   if ((a.kind==='number'&&b.kind==='u64')||(a.kind==='u64'&&b.kind==='number')) return TypeInfo.u64();
+  if (a.kind==='record' && b.kind==='record' && a.cppName===b.cppName && a.fields.length===b.fields.length) {
+    return TypeInfo.record(a.fields.map((f,i)=>({name:f.name,type:mergeType(f.type,b.fields[i].type)})));
+  }
+  if (a.kind==='function' && b.kind==='function') return TypeInfo.fn(mergeType(a.ret,b.ret));
   if ((a.kind==='array'||a.kind==='vector') && (b.kind==='array'||b.kind==='vector')) {
     return TypeInfo.vector(mergeType(a.elem,b.elem));
   }
@@ -129,6 +157,8 @@ function typeToCpp(t) {
     case 'array': return t.size==null ? `vector<${typeToCpp(t.elem)}>` : `array<${typeToCpp(t.elem)},${t.size}>`;
     case 'set': return `set<${typeToCpp(t.elem)}>`;
     case 'map': return `map<${typeToCpp(t.key)},${typeToCpp(t.value)}>`;
+    case 'record': return `${t.cppName}<${t.fields.map(f=>typeToCpp(f.type)).join(',')}>`;
+    case 'function': return 'auto';
     case 'custom': return t.name;
     default: return 'auto';
   }
@@ -142,6 +172,8 @@ function promoteNumericToReal(t) {
   if (t.kind==='tuple') return TypeInfo.tuple(t.elems.map(promoteNumericToReal));
   if (t.kind==='set') return TypeInfo.set(promoteNumericToReal(t.elem));
   if (t.kind==='map') return TypeInfo.map(promoteNumericToReal(t.key),promoteNumericToReal(t.value));
+  if (t.kind==='record') return TypeInfo.record(t.fields.map(f=>({name:f.name,type:promoteNumericToReal(f.type)})));
+  if (t.kind==='function') return TypeInfo.fn(promoteNumericToReal(t.ret));
   return t;
 }
 
@@ -153,6 +185,8 @@ function promoteNumericToU64(t) {
   if (t.kind==='tuple') return TypeInfo.tuple(t.elems.map(promoteNumericToU64));
   if (t.kind==='set') return TypeInfo.set(promoteNumericToU64(t.elem));
   if (t.kind==='map') return TypeInfo.map(promoteNumericToU64(t.key),promoteNumericToU64(t.value));
+  if (t.kind==='record') return TypeInfo.record(t.fields.map(f=>({name:f.name,type:promoteNumericToU64(f.type)})));
+  if (t.kind==='function') return TypeInfo.fn(promoteNumericToU64(t.ret));
   return t;
 }
 
@@ -183,6 +217,8 @@ class Converter {
     this.inMainBody=false;
     this.returnExpected=TypeInfo.unknown();
     this.needHelpers=new Set();
+    this.recordShapes=new Map();
+    this.typeAliases=this.collectTypeAliases();
     this.tupleWidths=this.collectTupleWidths();
     this.topLevelDefs=this.collectTopLevelDefs();
     this.realVars=new Set(this.doubleNames);
@@ -402,6 +438,77 @@ class Converter {
     return isU64?promoteNumericToU64(t):t;
   }
 
+  collectTypeAliases() {
+    const out=new Map();
+    const visit=(n)=>{
+      if(ts.isTypeAliasDeclaration(n) && n.name) out.set(n.name.text,n.type);
+      ts.forEachChild(n,visit);
+    };
+    visit(this.sf);
+    return out;
+  }
+
+  propertyNameText(name) {
+    if(ts.isIdentifier(name)||ts.isStringLiteral(name)||ts.isNumericLiteral(name)) return name.text;
+    return null;
+  }
+
+  registerRecord(t) {
+    if(t?.kind==='record') this.recordShapes.set(t.cppName,t.fields.map(f=>f.name));
+    return t;
+  }
+
+  inferObjectLiteralType(node,body=null) {
+    const fields=[];
+    for(const p of node.properties){
+      if(ts.isShorthandPropertyAssignment(p)){
+        const name=p.name.text;
+        let t=body?this.declaredLocalType(body,name):TypeInfo.unknown();
+        if(t.kind==='unknown') t=this.env.get(name)||this.inferExpr(p.name);
+        if(this.isRealIdentifier(p.name)) t=promoteNumericToReal(t);
+        if(this.isU64Identifier(p.name)) t=promoteNumericToU64(t);
+        fields.push({name,type:t});
+      }else if(ts.isPropertyAssignment(p)){
+        const name=this.propertyNameText(p.name);
+        if(name==null){ this.warn(p,'Computed object property is not supported.'); return TypeInfo.unknown(); }
+        fields.push({name,type:this.inferExpr(p.initializer)});
+      }else{
+        this.warn(p,'Only simple object properties are supported in object literals.');
+        return TypeInfo.unknown();
+      }
+    }
+    return this.registerRecord(TypeInfo.record(fields));
+  }
+
+  emitObjectLiteral(node,expected=TypeInfo.unknown()) {
+    const values=[];
+    const names=[];
+    for(const p of node.properties){
+      if(ts.isShorthandPropertyAssignment(p)){ names.push(p.name.text); values.push(p.name); }
+      else if(ts.isPropertyAssignment(p)){ const name=this.propertyNameText(p.name); if(name==null){ this.warn(p,'Computed object property is not supported.'); return node.getText(this.sf); } names.push(name); values.push(p.initializer); }
+      else{ this.warn(p,'Only simple object properties are supported in object literals.'); return node.getText(this.sf); }
+    }
+    let t=this.registerRecord(TypeInfo.record(names.map((name,i)=>({name,type:this.inferExpr(values[i])}))));
+    if(expected.kind==='record' && expected.cppName===t.cppName && fullyKnownType(expected)) t=this.registerRecord(expected);
+    const args=values.map((v,i)=>this.emitExpr(v,t.fields[i]?.type||TypeInfo.unknown())).join(',');
+    if(fullyKnownType(t)) return `${typeToCpp(t)}{${args}}`;
+    return `make_${t.cppName}(${values.map(v=>this.emitExpr(v)).join(',')})`;
+  }
+
+  generatedRecordHelpers() {
+    const out=[];
+    for(const [cppName,names] of this.recordShapes){
+      const tp=names.map((_,i)=>`class T${i}`).join(',');
+      const args=names.map((n,i)=>`T${i} ${n}`).join('; ');
+      const params=names.map((n,i)=>`U${i}&& ${n}`).join(',');
+      const up=names.map((_,i)=>`class U${i}`).join(',');
+      const types=names.map((_,i)=>`decay_t<U${i}>`).join(',');
+      const vals=names.map((n,i)=>`forward<U${i}>(${n})`).join(',');
+      out.push(`template<${tp}> struct ${cppName}{ ${args}; };\ntemplate<${up}> ${cppName}<${types}> make_${cppName}(${params}){ return {${vals}}; }`);
+    }
+    return out.join('\n\n');
+  }
+
   collectTopLevelDefs() {
     const defs=new Map();
     for (const st of this.sf.statements) {
@@ -438,7 +545,7 @@ class Converter {
       'Math','Number','BigInt','String','Array','Set','Map','console','Infinity',
       'true','false','undefined','less','greater',
       // AHC runtime is provided natively on the C++ side.
-      'Timer','RNG','Annealing','MonteCarlo','BeamSearch','ZobristHash','seedFromClock'
+      'Timer','RNG','Annealing','MonteCarlo','BeamSearch','ZobristHash','MinCostFlow','seedFromClock'
     ]);
     const wanted=new Set();
     const q=[...this.identifiersIn(main.body)];
@@ -496,6 +603,10 @@ class Converter {
 
   typeFromTypeNode(node) {
     if (!node) return TypeInfo.unknown();
+    if (node.kind===ts.SyntaxKind.AnyKeyword) return TypeInfo.unknown();
+    if (ts.isTypeLiteralNode(node)) {
+      const fields=[]; for(const m of node.members){ if(!ts.isPropertySignature(m)||!m.name) return TypeInfo.unknown(); const name=this.propertyNameText(m.name); if(name==null) return TypeInfo.unknown(); fields.push({name,type:this.typeFromTypeNode(m.type)}); } return this.registerRecord(TypeInfo.record(fields));
+    }
     switch(node.kind) {
       case ts.SyntaxKind.NumberKeyword:
       case ts.SyntaxKind.BigIntKeyword: return TypeInfo.number();
@@ -512,6 +623,7 @@ class Converter {
     if (ts.isTypeReferenceNode(node)) {
       const name=node.typeName.getText(this.sf);
       const args=node.typeArguments||[];
+      if (this.typeAliases?.has(name)) return this.typeFromTypeNode(this.typeAliases.get(name));
       if (name==='Array' || name==='ReadonlyArray') return TypeInfo.vector(this.typeFromTypeNode(args[0]));
       if (name==='Float32Array' || name==='Float64Array') return TypeInfo.vector(TypeInfo.real());
       if (['Int8Array','Int16Array','Int32Array','Uint8Array','Uint8ClampedArray','Uint16Array','Uint32Array','BigInt64Array','BigUint64Array'].includes(name)) return TypeInfo.vector(TypeInfo.number());
@@ -525,6 +637,8 @@ class Converter {
     if (ts.isAwaitExpression(node)) return this.inferExpr(node.expression);
     if (!node) return TypeInfo.unknown();
     if (ts.isParenthesizedExpression(node)) return this.inferExpr(node.expression);
+    if (ts.isAsExpression(node)||ts.isTypeAssertionExpression(node)) { const t=this.typeFromTypeNode(node.type); return t.kind==='unknown'?this.inferExpr(node.expression):t; }
+    if (ts.isObjectLiteralExpression(node)) return this.inferObjectLiteralType(node);
     if (ts.isNumericLiteral(node)) return /[.eE]/.test(node.getText(this.sf))?TypeInfo.real():TypeInfo.number();
     if (ts.isBigIntLiteral(node)) return TypeInfo.number();
     if (node.kind===ts.SyntaxKind.TrueKeyword || node.kind===ts.SyntaxKind.FalseKeyword) return TypeInfo.bool();
@@ -569,6 +683,7 @@ class Converter {
     if (ts.isPropertyAccessExpression(node)) {
       const base=this.inferExpr(node.expression);
       if (node.name.text==='length'||node.name.text==='size') return TypeInfo.number();
+      if (base.kind==='record') { const f=base.fields.find(x=>x.name===node.name.text); if(f) return f.type; }
       return TypeInfo.unknown();
     }
     if (ts.isNewExpression(node)) {
@@ -579,6 +694,7 @@ class Converter {
       if (name==='Float32Array' || name==='Float64Array') return TypeInfo.vector(TypeInfo.real());
       if (['Int8Array','Int16Array','Int32Array','Uint8Array','Uint8ClampedArray','Uint16Array','Uint32Array','BigInt64Array','BigUint64Array'].includes(name)) return TypeInfo.vector(TypeInfo.number());
       if (name==='Array') return TypeInfo.vector(args.length?this.typeFromTypeNode(args[0]):TypeInfo.unknown());
+      if (name==='MinCostFlow') return TypeInfo.custom('MinCostFlow');
       if (name==='Timer'||name==='RNG'||name==='Annealing'||name==='ZobristHash'||name==='UnionFind') return TypeInfo.custom(name);
       if (name==='PriorityQueue') {
         const elem=args.length?this.typeFromTypeNode(args[0]):TypeInfo.unknown();
@@ -587,7 +703,9 @@ class Converter {
     }
     if (ts.isCallExpression(node)) {
       const callee=node.expression;
+      if (ts.isPropertyAccessExpression(callee) && callee.name.text==='fill') { const arr=callee.expression; let sizeNode=null; if(ts.isCallExpression(arr)&&ts.isIdentifier(arr.expression)&&arr.expression.text==='Array') sizeNode=arr.arguments[0]; if(ts.isNewExpression(arr)&&ts.isIdentifier(arr.expression)&&arr.expression.text==='Array') sizeNode=arr.arguments?.[0]; if(sizeNode){ const v=node.arguments[0]; return TypeInfo.vector(v?this.inferExpr(v):TypeInfo.number()); } }
       if (ts.isIdentifier(callee)) {
+        const ft=this.env.get(callee.text); if(ft?.kind==='function') return ft.ret;
         if (['nextNum','nextBigInt'].includes(callee.text)) return TypeInfo.number();
         // JavaScript/TypeScript の Number(...) は常に IEEE-754 number。
         // 特に Number(S[i]) は1文字stringを数値としてパースするため、C++の char cast とは意味が異なる。
@@ -777,6 +895,8 @@ class Converter {
   emitExpr(node, expected=TypeInfo.unknown()) {
     if (!node) return '';
     if (ts.isParenthesizedExpression(node)) return `(${this.emitExpr(node.expression,expected)})`;
+    if (ts.isAsExpression(node)||ts.isTypeAssertionExpression(node)) { const ann=this.typeFromTypeNode(node.type); return this.emitExpr(node.expression,expected.kind==='unknown'?ann:expected); }
+    if (ts.isObjectLiteralExpression(node)) return this.emitObjectLiteral(node,expected);
     if (ts.isAwaitExpression(node)) return this.emitExpr(node.expression,expected);
     if (ts.isIdentifier(node)) {
       if (node.text==='Infinity') return 'LINF';
@@ -895,7 +1015,7 @@ class Converter {
       }
       return `${this.emitExpr(node.left,lt)}${op}${this.emitExpr(node.right,rt)}`;
     }
-    if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node)) return this.emitExpr(node.expression,expected);
+    if (ts.isNonNullExpression(node)) return this.emitExpr(node.expression,expected);
     if (ts.isArrowFunction(node)||ts.isFunctionExpression(node)) return this.emitLambda(node);
     if (ts.isNewExpression(node)) {
       const name=node.expression.getText(this.sf);
@@ -903,6 +1023,7 @@ class Converter {
       if (name==='Timer') this.needHelpers.add('ahc_timer');
       if (name==='RNG') this.needHelpers.add('ahc_rng');
       if (name==='Annealing') { this.needHelpers.add('ahc_annealing'); this.needHelpers.add('ahc_rng'); }
+      if (name==='MinCostFlow') this.needHelpers.add('min_cost_flow');
       if (name==='UnionFind') {
         if (this.templateCaps.dsu) return `DSU(${args.map(x=>this.emitExpr(x)).join(',')})`;
         this.needHelpers.add('union_find');
@@ -964,31 +1085,61 @@ class Converter {
 
     let merged=TypeInfo.unknown();
     const body=node.body;
-    const visit=(n)=>{
-      // Returns inside nested lambdas/functions belong to another scope.
-      if (n!==body && (ts.isArrowFunction(n)||ts.isFunctionExpression(n)||ts.isFunctionDeclaration(n))) return;
-      if (ts.isReturnStatement(n) && n.expression) {
-        const e=n.expression;
-        // Empty [] has no element type by itself. Infer it from another return.
-        if (ts.isArrayLiteralExpression(e) && e.elements.length===0) return;
-        let t=TypeInfo.unknown();
-        if (ts.isIdentifier(e)) {
-          t=this.declaredLocalType(body,e.text);
-          // The declaration may start from an integer literal (e.g. `let score = 0`)
-          // and later become real through `+= prob*(1-p)`.  emitVariableDeclaration()
-          // already promotes such locals to double via real-flow analysis, so the
-          // lambda return type must apply the same promotion.  Otherwise C++ gets
-          // `-> ll` and silently truncates the probabilistic score on return.
-          if (this.isRealIdentifier(e)) t=promoteNumericToReal(t);
+    const inferReturn=(e)=>{
+      if(ts.isObjectLiteralExpression(e)){
+        const fields=[];
+        for(const p of e.properties){
+          if(ts.isShorthandPropertyAssignment(p)){
+            const name=p.name.text;
+            let t=this.declaredLocalType(body,name);
+            if(t.kind==='unknown') t=this.env.get(name)||TypeInfo.unknown();
+            if(this.isRealIdentifier(p.name)) t=promoteNumericToReal(t);
+            if(this.isU64Identifier(p.name)) t=promoteNumericToU64(t);
+            fields.push({name,type:t});
+          }else if(ts.isPropertyAssignment(p)){
+            const name=this.propertyNameText(p.name);
+            if(name==null) return TypeInfo.unknown();
+            fields.push({name,type:this.inferExpr(p.initializer)});
+          }else return TypeInfo.unknown();
         }
-        if (t.kind==='unknown') t=this.inferExpr(e);
-        merged=mergeType(merged,t);
-        return;
+        return this.registerRecord(TypeInfo.record(fields));
       }
+      if(ts.isIdentifier(e)){
+        let t=this.declaredLocalType(body,e.text);
+        if(this.isRealIdentifier(e)) t=promoteNumericToReal(t);
+        if(this.isU64Identifier(e)) t=promoteNumericToU64(t);
+        if(t.kind!=='unknown') return t;
+      }
+      return this.inferExpr(e);
+    };
+    const visit=(n)=>{
+      if (n!==body && (ts.isArrowFunction(n)||ts.isFunctionExpression(n)||ts.isFunctionDeclaration(n))) return;
+      if (ts.isReturnStatement(n) && n.expression) { merged=mergeType(merged,inferReturn(n.expression)); return; }
       ts.forEachChild(n,visit);
     };
     visit(body);
     return merged;
+  }
+
+  parameterPassingMode(node,name,pt) {
+    if(!node.body || !ts.isBlock(node.body)) return 'value';
+    let rebound=false, mutated=false;
+    const mutating=new Set(['push','pop','splice','sort','reverse','fill','set','add','delete','clear']);
+    const visit=(n)=>{
+      if(n!==node.body && (ts.isArrowFunction(n)||ts.isFunctionExpression(n)||ts.isFunctionDeclaration(n))) return;
+      if(ts.isBinaryExpression(n) && [ts.SyntaxKind.EqualsToken,ts.SyntaxKind.PlusEqualsToken,ts.SyntaxKind.MinusEqualsToken,ts.SyntaxKind.AsteriskEqualsToken,ts.SyntaxKind.SlashEqualsToken].includes(n.operatorToken.kind)){
+        const root=this.rootIdentifier(n.left); if(root===name){ if(ts.isIdentifier(n.left)) rebound=true; else mutated=true; }
+      }
+      if(ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)){
+        const root=this.rootIdentifier(n.expression.expression); if(root===name && mutating.has(n.expression.name.text)) mutated=true;
+      }
+      ts.forEachChild(n,visit);
+    };
+    visit(node.body);
+    if(rebound) return 'value';
+    if(mutated) return 'ref';
+    if(['vector','array','map','set','record'].includes(pt.kind)) return 'constref';
+    return 'value';
   }
 
   emitLambda(node) {
@@ -1005,7 +1156,13 @@ class Converter {
       }
       const pt=this.typeFromTypeNode(p.type);
       this.env.set(p.name.text,pt);
-      ps.push(`${pt.kind==='unknown'?'auto&&':typeToCpp(pt)} ${p.name.text}`);
+      const mode=this.parameterPassingMode(node,p.name.text,pt);
+      let pct;
+      if(pt.kind==='unknown') pct=mode==='value'?'auto':(mode==='ref'?'auto&':'auto&&');
+      else if(mode==='constref') pct=`const ${typeToCpp(pt)}&`;
+      else if(mode==='ref') pct=`${typeToCpp(pt)}&`;
+      else pct=typeToCpp(pt);
+      ps.push(`${pct} ${p.name.text}`);
     }
     let body;
     if (ts.isBlock(node.body)) body=this.emitBlock(node.body,0,true);
@@ -1014,7 +1171,7 @@ class Converter {
     // exactly the same type. TypeScript permits implicit numeric conversions, so
     // emit a trailing return type whenever we can infer one. This also makes
     // explicit TS annotations such as `(x): number => ...` authoritative.
-    const ret=this.returnExpected.kind==='unknown' ? '' : ` -> ${typeToCpp(this.returnExpected)}`;
+    const ret=fullyKnownType(this.returnExpected) ? ` -> ${typeToCpp(this.returnExpected)}` : '';
     this.env=saved;
     this.inMainBody=savedMain;
     this.returnExpected=savedReturnExpected;
@@ -1150,8 +1307,11 @@ class Converter {
         return `ts2cpp_date_now()`;
       }
       if (objNode.getText(this.sf)==='Math') {
-        if ((name==='min'||name==='max') && args.length===2 && args.some(x=>this.exprUsesReal(x)||this.inferExpr(x).kind==='real')) {
-          return `${name}<double>(${args.map(x=>this.emitExpr(x)).join(',')})`;
+        if (name==='min'||name==='max') {
+          const real=args.some(x=>this.exprUsesReal(x)||this.inferExpr(x).kind==='real');
+          const ct=real?'double':'ll';
+          if(args.length===1) return `(${ct})(${this.emitExpr(args[0])})`;
+          return `${name}<${ct}>({${args.map(x=>this.emitExpr(x)).join(',')}})`;
         }
         if (name==='round' && args.length===1) {
           // JS Math.round(x) is floor(x+0.5) (ignoring the irrelevant -0 distinction).
@@ -1356,6 +1516,35 @@ class Converter {
     return null;
   }
 
+  inferEmptyArrayTypeFromPush(decl,name) {
+    if(!decl || !ts.isIdentifier(decl.name)) return TypeInfo.unknown();
+    const declSym=this.checker.getSymbolAtLocation(decl.name);
+    const declKey=this.symbolKey(declSym);
+    let elem=TypeInfo.unknown();
+    let scope=decl.parent?.parent?.parent || this.findMain()?.body || this.sf;
+    const visit=(n)=>{
+      if(n!==scope && (ts.isFunctionDeclaration(n)||ts.isArrowFunction(n)||ts.isFunctionExpression(n))){
+        // Still inspect the function that directly owns this declaration, but not nested functions.
+        if(!(scope===n.body || scope.parent===n)) return;
+      }
+      if(ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text==='push' && n.arguments.length){
+        const obj=n.expression.expression;
+        const root=this.rootIdentifierNode(obj);
+        if(root){
+          const sym=this.checker.getSymbolAtLocation(root);
+          const key=this.symbolKey(sym);
+          const same=(declSym&&sym&&declSym===sym) || (declKey&&key&&declKey===key) || (!declSym&&!sym&&root.text===name);
+          if(same){
+            for(const a of n.arguments) elem=mergeType(elem,this.inferExpr(a));
+          }
+        }
+      }
+      ts.forEachChild(n,visit);
+    };
+    visit(scope);
+    return elem.kind==='unknown'?TypeInfo.unknown():TypeInfo.vector(elem);
+  }
+
   emitVarDecl(decl, isConst=false) {
     if (!ts.isIdentifier(decl.name)) {
       if (ts.isArrayBindingPattern(decl.name)) return this.emitBindingDecl(decl);
@@ -1422,7 +1611,8 @@ class Converter {
       t=this.applyRealPromotion(name,t,decl.name);
       t=this.applyU64Promotion(name,t,decl.name);
       const w=this.tupleWidths.get(name);
-      if (w && t.kind==='vector' && t.elem?.kind==='vector') t=TypeInfo.vector(TypeInfo.array(t.elem.elem,w));
+      if (annotated.kind==='unknown' && w && t.kind==='vector' && t.elem?.kind==='vector') t=TypeInfo.vector(TypeInfo.array(t.elem.elem,w));
+      if (annotated.kind==='unknown') { const inferredEmpty=this.inferEmptyArrayTypeFromPush(decl,name); if(inferredEmpty.kind!=='unknown') t=inferredEmpty; }
       this.env.set(name,t); return `${typeToCpp(t)} ${name};`;
     }
 
@@ -1513,7 +1703,8 @@ class Converter {
 
     // Arrow/function variable.
     if (ts.isArrowFunction(init)||ts.isFunctionExpression(init)) {
-      this.env.set(name,TypeInfo.unknown());
+      const rt=this.inferLambdaReturnType(init);
+      this.env.set(name,TypeInfo.fn(rt));
       return `auto ${name}=${this.emitLambda(init)};`;
     }
 
@@ -1694,10 +1885,13 @@ class Converter {
     if (ts.isBreakStatement(st)) return st.label?`goto __ts2cpp_break_${st.label.text};`:'break;';
     if (ts.isContinueStatement(st)) return st.label?`goto __ts2cpp_continue_${st.label.text};`:'continue;';
     if (ts.isEmptyStatement(st)) return ';';
+    if (ts.isTypeAliasDeclaration(st)||ts.isInterfaceDeclaration(st)) return '';
     if (ts.isFunctionDeclaration(st) && st.name && st.body) {
-      // Local named function. Generic lambda supports non-recursive helpers; recursive helpers get warning.
-      this.warn(st,`Local function '${st.name.text}' is emitted as a lambda; recursive calls may require manual self-parameter conversion.`);
       const fake={...st, parameters:st.parameters, body:st.body};
+      const ids=this.identifiersIn(st.body);
+      if(ids.has(st.name.text)) this.warn(st,`Recursive local function '${st.name.text}' may require manual self-parameter conversion.`);
+      const rt=this.inferLambdaReturnType(fake);
+      this.env.set(st.name.text,TypeInfo.fn(rt));
       return `auto ${st.name.text}=${this.emitLambda(fake)};`;
     }
     if (ts.isSwitchStatement(st)) {
@@ -1727,6 +1921,10 @@ class Converter {
   }
 
   emitExpressionStatement(e) {
+    if (ts.isBinaryExpression(e) && e.operatorToken.kind===ts.SyntaxKind.EqualsToken && ts.isArrayLiteralExpression(e.right) && e.right.elements.length===0) {
+      return `${this.emitExpr(e.left)}.clear();`;
+    }
+
     // Array.length assignment used as a mutating statement.
     // `a.length = 0` -> clear(), otherwise resize().
     if (
@@ -1750,6 +1948,18 @@ class Converter {
         return `for(ll __ts2cpp_i${id}=0;__ts2cpp_i${id}<${n};__ts2cpp_i${id}++){ ll __ts2cpp_dummy${id}; cin>>__ts2cpp_dummy${id}; }`;
       }
       if (ts.isPropertyAccessExpression(e.expression) && e.expression.expression.getText(this.sf)==='console' && e.expression.name.text==='log') { const out=this.emitOutput('println',e.arguments); return out.replace(/<<'\\n';$/, '<<endl;'); }
+
+      if (ts.isPropertyAccessExpression(e.expression) && e.expression.name.text==='splice') {
+        const obj=this.emitExpr(e.expression.expression);
+        if(e.arguments.length>=1 && e.arguments.length<=2){
+          const l=this.emitExpr(e.arguments[0]);
+          const c=e.arguments[1]?this.emitExpr(e.arguments[1]):null;
+          const id=this.tmpId++;
+          if(c) return `{ ll __l${id}=${l}; ll __r${id}=min<ll>((ll)${obj}.size(),__l${id}+(${c})); ${obj}.erase(${obj}.begin()+__l${id},${obj}.begin()+__r${id}); }`;
+          return `${obj}.erase(${obj}.begin()+(${l}),${obj}.end());`;
+        }
+        this.warn(e,'splice() with inserted elements is not supported yet.');
+      }
 
       // sort mutates in-place.
       if (ts.isPropertyAccessExpression(e.expression) && e.expression.name.text==='sort') {
@@ -1873,7 +2083,9 @@ class Converter {
     const bodyText=lines.join('\n');
     if (mode==='body') return bodyText+'\n';
     const mainText=`int main(){\n  ios::sync_with_stdio(false);\n  cin.tie(nullptr);\n\n${indent(bodyText)}\n\n  return 0;\n}`;
-    const depsText=depTexts.length?depTexts.join('\n\n')+'\n\n':'';
+    const recordText=this.generatedRecordHelpers();
+    const depParts=[]; if(recordText) depParts.push(recordText); if(depTexts.length) depParts.push(depTexts.join('\n\n'));
+    const depsText=depParts.length?depParts.join('\n\n')+'\n\n':'';
     // --main-only is intended to be pasted into the user's C++ template.
     // Include any generic helper functions required by the converted main/dependencies.
     // AHC runtime types (Timer/RNG/Annealing) remain owned by the user's C++ template.
@@ -1889,7 +2101,7 @@ class Converter {
 
   header() {
     const hs=[
-      '// Generated by ts_main_to_cpp_v32',
+      '// Generated by ts_main_to_cpp_v33',
       '#include <bits/stdc++.h>',
       'using namespace std;',
       '',
@@ -1958,6 +2170,34 @@ class Converter {
   bool acceptMax(double delta,double temp,RNG& rng) const{ if(delta>=0) return true; if(temp<=0) return false; return rng.nextDouble()<exp(delta/temp); }
   bool acceptMin(double delta,double temp,RNG& rng) const{ return acceptMax(-delta,temp,rng); }
 };`);
+    if (this.needHelpers.has('min_cost_flow')) hs.push('',`struct TsMinCostEdge{ int to,rev; ll cap,cost; };
+struct MinCostFlow{
+  int n; vector<vector<TsMinCostEdge>> G;
+  explicit MinCostFlow(int n):n(n),G(n){}
+  void addEdge(int from,int to,ll cap,ll cost){
+    int fi=(int)G[from].size(), ti=(int)G[to].size();
+    G[from].push_back({to,ti,cap,cost});
+    G[to].push_back({from,fi,0,-cost});
+  }
+  ll flow(int s,int t,ll f){
+    const ll INFMC=(1LL<<62);
+    vector<ll> h(n,0),dist(n); vector<int> pv(n),pe(n); ll res=0;
+    while(f>0){
+      fill(dist.begin(),dist.end(),INFMC); dist[s]=0;
+      priority_queue<pair<ll,int>,vector<pair<ll,int>>,greater<pair<ll,int>>> pq; pq.push({0,s});
+      while(!pq.empty()){
+        auto [d,v]=pq.top(); pq.pop(); if(dist[v]!=d) continue;
+        for(int i=0;i<(int)G[v].size();i++){ auto const& e=G[v][i]; if(e.cap<=0) continue; ll nd=d+e.cost+h[v]-h[e.to]; if(nd<dist[e.to]){ dist[e.to]=nd; pv[e.to]=v; pe[e.to]=i; pq.push({nd,e.to}); } }
+      }
+      if(dist[t]==INFMC) return -1;
+      for(int v=0;v<n;v++) if(dist[v]<INFMC) h[v]+=dist[v];
+      ll d=f; for(int v=t;v!=s;v=pv[v]) d=min(d,G[pv[v]][pe[v]].cap);
+      f-=d; res+=d*h[t];
+      for(int v=t;v!=s;v=pv[v]){ auto &e=G[pv[v]][pe[v]]; e.cap-=d; G[v][e.rev].cap+=d; }
+    }
+    return res;
+  }
+};`);
     if (this.needHelpers.has('date_now')) hs.push('',`inline long long ts2cpp_date_now(){ using namespace chrono; return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count(); }`);
     return hs.join('\n')+'\n\n';
   }
@@ -1997,6 +2237,34 @@ function templateExtraHelpers(needHelpers) {
   if (needHelpers.has('number_any')) hs.push(`inline double ts_number_any(const string& s){ if(s.empty()) return 0.0; char* e=nullptr; double v=strtod(s.c_str(),&e); if(e==s.c_str()) return numeric_limits<double>::quiet_NaN(); while(*e && isspace((unsigned char)*e)) ++e; if(*e) return numeric_limits<double>::quiet_NaN(); return v; } inline double ts_number_any(char c){ char s[2]={c,0}; return ts_number_any(string(s)); } inline double ts_number_any(bool x){ return x?1.0:0.0; } template<class T,enable_if_t<is_arithmetic_v<T>,int> =0> double ts_number_any(T x){ return (double)x; }`);
   if (needHelpers.has('union_find')) hs.push(`struct UnionFind{ vector<int> p,s; explicit UnionFind(int n):p(n),s(n,1){ iota(p.begin(),p.end(),0); } int root(int x){ return p[x]==x?x:p[x]=root(p[x]); } bool connect(int a,int b){ a=root(a); b=root(b); if(a==b)return false; if(s[a]<s[b])swap(a,b); p[b]=a; s[a]+=s[b]; return true; } bool same(int a,int b){ return root(a)==root(b); } int size(int x){ return s[root(x)]; } };`);
   if (needHelpers.has('priority_queue')) hs.push(`template<class T> struct TsPriorityQueue{ function<double(const T&,const T&)> cmp; vector<T> h; template<class F> explicit TsPriorityQueue(F f):cmp(f){} bool better(const T&a,const T&b)const{return cmp(a,b)<0;} void push(T x){h.push_back(move(x));int i=(int)h.size()-1;while(i){int p=(i-1)/2;if(!better(h[i],h[p]))break;swap(h[i],h[p]);i=p;}} T pop(){T r=move(h[0]);if(h.size()==1){h.pop_back();return r;}h[0]=move(h.back());h.pop_back();int i=0;while(true){int l=i*2+1,rn=l+1,b=i;if(l<(int)h.size()&&better(h[l],h[b]))b=l;if(rn<(int)h.size()&&better(h[rn],h[b]))b=rn;if(b==i)break;swap(h[i],h[b]);i=b;}return r;} const T& top()const{return h[0];} bool empty()const{return h.empty();} size_t size()const{return h.size();} };`);
+  if (needHelpers.has('min_cost_flow')) hs.push(`struct TsMinCostEdge{ int to,rev; ll cap,cost; };
+struct MinCostFlow{
+  int n; vector<vector<TsMinCostEdge>> G;
+  explicit MinCostFlow(int n):n(n),G(n){}
+  void addEdge(int from,int to,ll cap,ll cost){
+    int fi=(int)G[from].size(), ti=(int)G[to].size();
+    G[from].push_back({to,ti,cap,cost});
+    G[to].push_back({from,fi,0,-cost});
+  }
+  ll flow(int s,int t,ll f){
+    const ll INFMC=(1LL<<62);
+    vector<ll> h(n,0),dist(n); vector<int> pv(n),pe(n); ll res=0;
+    while(f>0){
+      fill(dist.begin(),dist.end(),INFMC); dist[s]=0;
+      priority_queue<pair<ll,int>,vector<pair<ll,int>>,greater<pair<ll,int>>> pq; pq.push({0,s});
+      while(!pq.empty()){
+        auto [d,v]=pq.top(); pq.pop(); if(dist[v]!=d) continue;
+        for(int i=0;i<(int)G[v].size();i++){ auto const& e=G[v][i]; if(e.cap<=0) continue; ll nd=d+e.cost+h[v]-h[e.to]; if(nd<dist[e.to]){ dist[e.to]=nd; pv[e.to]=v; pe[e.to]=i; pq.push({nd,e.to}); } }
+      }
+      if(dist[t]==INFMC) return -1;
+      for(int v=0;v<n;v++) if(dist[v]<INFMC) h[v]+=dist[v];
+      ll d=f; for(int v=t;v!=s;v=pv[v]) d=min(d,G[pv[v]][pe[v]].cap);
+      f-=d; res+=d*h[t];
+      for(int v=t;v!=s;v=pv[v]){ auto &e=G[pv[v]][pe[v]]; e.cap-=d; G[v][e.rev].cap+=d; }
+    }
+    return res;
+  }
+};`);
   if (needHelpers.has('date_now')) hs.push(`inline long long ts2cpp_date_now(){ using namespace chrono; return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count(); }`);
   // Timer/RNG/Annealing/seedFromClock are intentionally omitted: the AHC C++ template owns them.
   return hs.join('\n\n');
@@ -2024,6 +2292,7 @@ function applyCppTemplate(templateText, convertedMainBlock, needHelpers) {
   if (templateText.includes('join_vec(const vector<T>&')) filtered.delete('join_vec');
   if (templateText.includes('to_string_any(const string&')) filtered.delete('to_string_any');
   if (templateText.includes('ts_number_any(const string&')) filtered.delete('number_any');
+  if (/\bstruct\s+MinCostFlow\b/.test(templateText)) filtered.delete('min_cost_flow');
   if (templateText.includes('ts2cpp_date_now()')) filtered.delete('date_now');
   if (/\bstruct\s+DSU\b/.test(templateText)) filtered.delete('union_find');
   const extra=templateExtraHelpers(filtered);

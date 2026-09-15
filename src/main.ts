@@ -3516,21 +3516,25 @@ class Segtree<S> {
 }
 
 /**
- * ABC322 F
+ * ABC357 F
  */
 interface LazySegTreeParams<S,F> {
   op?: OperatorType<S>
   e: ElementType<S>
-  map?: MappingType<S, F>
-  cmp: CompositionType<F>
+  map?: MappingType<S,F>
+  cmp?: CompositionType<F>
   id: IdType<F>
 
   // object型Sを新しく生成せず、outへ直接書き込む高速版
-  opInto?: (out: S, a: S, b: S) => void
+  opInto?: (out:S,a:S,b:S) => void
 
   // object型Sを新しく生成せず、outへ直接書き込む高速版
   // out === x になる場合がある
-  mapInto?: (out: S, f: F, x: S) => void
+  mapInto?: (out:S,f:F,x:S) => void
+
+  // object型Fを新しく生成せず、outへ直接書き込む高速版
+  // out === g になる場合がある
+  cmpInto?: (out:F,f:F,g:F) => void
 }
 
 /**
@@ -3538,13 +3542,15 @@ interface LazySegTreeParams<S,F> {
  * 使い方: new LazySegtree(A,{op,e,map,cmp,id})
  * 計算量: 構築 O(N)、更新/取得 O(log N)
  */
-class LazySegtree<S = number, F = number> {
-  private merge?: OperatorType<S>;                     // 2つの要素を統合する操作 (op)
-  private mergeInto?: (out: S, a: S, b: S) => void;   // object型用高速版
-  private identityElement: ElementType<S>;             // 単位元 (e)
-  private applyMapping?: MappingType<S, F>;            // 要素に操作を適用する (mapping)
-  private applyMappingInto?: (out: S, f: F, x: S) => void; // object型用高速版
-  private mergeLazy: CompositionType<F>;               // 遅延操作を統合する (composition)
+class LazySegtree<S = number,F = number> {
+  private merge?: OperatorType<S>;                       // 2つの要素を統合する操作 (op)
+  private mergeInto?: (out:S,a:S,b:S) => void;          // object型用高速版
+  private identityElement: ElementType<S>;               // 単位元 (e)
+  private applyMapping?: MappingType<S,F>;               // 要素に操作を適用する (mapping)
+  private applyMappingInto?: (out:S,f:F,x:S) => void;    // object型用高速版
+  private mergeLazy?: CompositionType<F>;                // 遅延操作を統合する (composition)
+  private mergeLazyInto?: (out:F,f:F,g:F) => void;       // object型F用高速版
+  private identityLazy: IdType<F>;                       // 遅延操作の単位元 (id)
 
   private leafCount: number;                 // 元の配列の長さ (_n)
   private treeCapacity: number;              // 木の葉の数（2のべき乗） (size)
@@ -3553,22 +3559,26 @@ class LazySegtree<S = number, F = number> {
   private lazyData: F[];                     // 遅延させている操作を保持する配列 (lz)
   private hasLazy: Uint8Array;               // 遅延作用を持っているか
 
-  private updateNode(k: number): void {
+  // query の object 型用一時領域
+  // 毎クエリごとのオブジェクト生成を減らす
+  private queryIdentity?: S;
+  private queryLeft?: S;
+  private queryRight?: S;
+  private queryLeftTmp?: S;
+  private queryRightTmp?: S;
+
+  // cmpInto で新しい遅延値をコピーするときに使う単位元
+  private lazyIdentity?: F;
+
+  private updateNode(k:number): void {
     if (this.mergeInto) {
-      this.mergeInto(
-        this.data[k],
-        this.data[2*k],
-        this.data[2*k+1]
-      );
+      this.mergeInto(this.data[k],this.data[2*k],this.data[2*k+1]);
     } else {
-      this.data[k] = this.merge!(
-        this.data[2*k],
-        this.data[2*k+1]
-      );
+      this.data[k] = this.merge!(this.data[2*k],this.data[2*k+1]);
     }
   }
 
-  private applyAt(k: number, f: F): void {
+  private applyAt(k:number,f:F): void {
     if (this.applyMappingInto) {
       this.applyMappingInto(this.data[k],f,this.data[k]);
     } else {
@@ -3577,22 +3587,36 @@ class LazySegtree<S = number, F = number> {
     // 葉でない場合は遅延配列に操作を蓄積
     if (k < this.treeCapacity) {
       if (this.hasLazy[k]) {
-        this.lazyData[k] = this.mergeLazy(f,this.lazyData[k]);
+        if (this.mergeLazyInto) {
+          // out === g になる
+          this.mergeLazyInto(this.lazyData[k],f,this.lazyData[k]);
+        } else {
+          this.lazyData[k] = this.mergeLazy!(f,this.lazyData[k]);
+        }
       } else {
-        this.lazyData[k] = f;
+        if (this.mergeLazyInto) {
+          // 同じ func オブジェクトを複数ノードで共有すると、
+          // 後の cmpInto で破壊されるため、各ノード専用の F を確保してコピーする
+          let out = this.lazyData[k];
+          if (out === undefined) {
+            out = this.identityLazy();
+            this.lazyData[k] = out;
+          }
+          // cmp(f,id)=f を利用してコピー
+          this.mergeLazyInto(out,f,this.lazyIdentity!);
+        } else {
+          this.lazyData[k] = f;
+        }
         this.hasLazy[k] = 1;
       }
     }
   }
 
-  private pushDown(k: number): void {
+  private pushDown(k:number): void {
     if (!this.hasLazy[k]) return;
-
     let f = this.lazyData[k];
-
     this.applyAt(2*k,f);
     this.applyAt(2*k+1,f);
-
     this.hasLazy[k] = 0;
   }
 
@@ -3601,47 +3625,102 @@ class LazySegtree<S = number, F = number> {
    * 使い方: new LazySegtree(A,{op,e,map,cmp,id})
    * 計算量: O(N)
    */
-  constructor(
-    initialValues: number | S[] = 0,
-    params: LazySegTreeParams<S, F>
-  ) {
-    const { op, e, map, cmp, opInto, mapInto} = params;
-    if (!op && !opInto) {
-      throw new Error("op or opInto is required");
-    }
-    if (!map && !mapInto) {
-      throw new Error("map or mapInto is required");
-    }
-
+  constructor(initialValues:number | S[] = 0,params:LazySegTreeParams<S,F>) {
+    const {op,e,map,cmp,id,opInto,mapInto,cmpInto} = params;
+    if (!op && !opInto) throw new Error("op or opInto is required");
+    if (!map && !mapInto) throw new Error("map or mapInto is required");
+    if (!cmp && !cmpInto) throw new Error("cmp or cmpInto is required");
     this.merge = op;
     this.mergeInto = opInto;
     this.identityElement = e;
     this.applyMapping = map;
     this.applyMappingInto = mapInto;
     this.mergeLazy = cmp;
-
-    const values =
-      typeof initialValues === "number"
-        ? new Array<S>(initialValues)
-            .fill(null as S)
-            .map(() => this.identityElement())
-        : initialValues;
-    this.leafCount = values.length;
+    this.mergeLazyInto = cmpInto;
+    this.identityLazy = id;
+    let isSize = typeof initialValues === "number";
+    this.leafCount = typeof initialValues === "number" ? initialValues : initialValues.length;
     this.treeCapacity = bit_ceil(this.leafCount);
     this.treeHeight = countr_zero(this.treeCapacity);
-    this.data =
-      new Array<S>(2*this.treeCapacity)
-        .fill(null as S)
-        .map(() => this.identityElement());
-    // hasLazy=false の場所は lazyData を参照しないため
-    // identityLazy で初期化する必要がない
+    /*
+     * 以前は
+     *
+     * new Array(2*size)
+     *   .fill(null)
+     *   .map(() => e())
+     *
+     * としていたため、後で上書きされる内部ノードや葉についても
+     * 大量に object を生成していた。
+     *
+     * 必要な場所だけ生成する。
+     */
+    this.data = new Array<S>(2*this.treeCapacity);
+    if (isSize) {
+      // initialValues が数値の場合は長さ N の単位元配列として扱う。
+      // mapInto により各葉が破壊的に更新される可能性があるため、
+      // 実際の葉についてはそれぞれ独立した object を生成する。
+      for (let i = 0; i < this.leafCount; i++) {
+        this.data[this.treeCapacity+i] = this.identityElement();
+      }
+    } else {
+      for (let i = 0; i < this.leafCount; i++) {
+        this.data[this.treeCapacity+i] = initialValues[i] as S;
+      }
+    }
+    /*
+     * 実配列より後ろの葉。
+     *
+     * valid な apply/set はここを直接更新しないため、
+     * 同じ単位元 object を共有してよい。
+     */
+    let paddingIdentity = this.identityElement();
+    for (let i = this.leafCount; i < this.treeCapacity; i++) {
+      this.data[this.treeCapacity+i] = paddingIdentity;
+    }
+    /*
+     * opInto の場合、各内部ノードは後から破壊的に更新されるため
+     * 独立した object を持つ必要がある。
+     *
+     * 通常 op の場合は op の返り値をそのまま格納するので、
+     * あらかじめ e() を生成する必要はない。
+     */
+    if (this.mergeInto) {
+      for (let i = this.treeCapacity-1; i >= 1; i--) {
+        let out = this.identityElement();
+        this.data[i] = out;
+        this.mergeInto(out,this.data[2*i],this.data[2*i+1]);
+      }
+      /*
+       * query 用一時領域。
+       *
+       * query ごとに leftResult / rightResult /
+       * leftTmp / rightTmp を生成すると GC 負荷が大きいため、
+       * 一度だけ生成して再利用する。
+       */
+      this.queryIdentity = this.identityElement();
+      this.queryLeft = this.identityElement();
+      this.queryRight = this.identityElement();
+      this.queryLeftTmp = this.identityElement();
+      this.queryRightTmp = this.identityElement();
+    } else {
+      for (let i = this.treeCapacity-1; i >= 1; i--) {
+        this.data[i] = this.merge!(this.data[2*i],this.data[2*i+1]);
+      }
+    }
+    /*
+     * hasLazy=false の場所は lazyData を参照しないため、
+     * identityLazy で全要素を初期化する必要がない。
+     */
     this.lazyData = new Array<F>(this.treeCapacity);
     this.hasLazy = new Uint8Array(this.treeCapacity);
-    for (let i = 0; i < this.leafCount; i++) {
-      this.data[this.treeCapacity+i] = values[i] as S;
-    }
-    for (let i = this.treeCapacity-1; i >= 1; i--) {
-      this.updateNode(i);
+    /*
+     * cmpInto 使用時は、cmp(f,id)=f を利用して
+     * lazyData に f をコピーする。
+     *
+     * id object は入力専用であり、破壊しない。
+     */
+    if (this.mergeLazyInto) {
+      this.lazyIdentity = this.identityLazy();
     }
   }
 
@@ -3650,7 +3729,7 @@ class LazySegtree<S = number, F = number> {
    * 使い方: seg.set(i,x)
    * 計算量: O(log N)
    */
-  set(index: number, value: S): void {
+  set(index:number,value:S): void {
     this.validateIndex(index);
     index += this.treeCapacity;
     for (let i = this.treeHeight; i >= 1; i--) {
@@ -3667,7 +3746,7 @@ class LazySegtree<S = number, F = number> {
    * 使い方: seg.get(i)
    * 計算量: O(log N)
    */
-  get(index: number): S {
+  get(index:number): S {
     this.validateIndex(index);
     index += this.treeCapacity;
     for (let i = this.treeHeight; i >= 1; i--) {
@@ -3681,52 +3760,42 @@ class LazySegtree<S = number, F = number> {
    * 使い方: seg.query(l,r)
    * 計算量: O(log N)
    */
-  query(left: number, right: number): S {
-    if (
-      !(
-        0 <= left
-        && left <= right
-        && right <= this.leafCount
-      )
-    ) {
+  query(left:number,right:number): S {
+    if (!(0 <= left && left <= right && right <= this.leafCount)) {
       throw new Error("Out of range");
     }
-    if (left === right) {
-      return this.identityElement();
-    }
+    if (left === right) return this.identityElement();
     left += this.treeCapacity;
     right += this.treeCapacity;
     for (let i = this.treeHeight; i >= 1; i--) {
-      if (((left>>i)<<i) !== left) {
-        this.pushDown(left>>i);
-      }
-      if (((right>>i)<<i) !== right) {
-        this.pushDown((right-1)>>i);
-      }
+      if (((left>>i)<<i) !== left) this.pushDown(left>>i);
+      if (((right>>i)<<i) !== right) this.pushDown((right-1)>>i);
     }
     // object型用高速版
     if (this.mergeInto) {
-      let leftResult = this.identityElement();
-      let rightResult = this.identityElement();
-      let leftTmp = this.identityElement();
-      let rightTmp = this.identityElement();
+      let mergeInto = this.mergeInto;
+      let identity = this.queryIdentity!;
+      let leftResult = this.queryLeft!;
+      let rightResult = this.queryRight!;
+      let leftTmp = this.queryLeftTmp!;
+      let rightTmp = this.queryRightTmp!;
+      /*
+       * 一時領域を単位元に戻す。
+       * op(e,e)=e を利用して object を新規生成せず初期化する。
+       */
+      mergeInto(leftResult,identity,identity);
+      mergeInto(rightResult,identity,identity);
+      mergeInto(leftTmp,identity,identity);
+      mergeInto(rightTmp,identity,identity);
       while (left < right) {
         if (left&1) {
-          this.mergeInto(
-            leftTmp,
-            leftResult,
-            this.data[left++]
-          );
+          mergeInto(leftTmp,leftResult,this.data[left++]);
           let t = leftResult;
           leftResult = leftTmp;
           leftTmp = t;
         }
         if (right&1) {
-          this.mergeInto(
-            rightTmp,
-            this.data[--right],
-            rightResult
-          );
+          mergeInto(rightTmp,this.data[--right],rightResult);
           let t = rightResult;
           rightResult = rightTmp;
           rightTmp = t;
@@ -3734,29 +3803,23 @@ class LazySegtree<S = number, F = number> {
         left >>= 1;
         right >>= 1;
       }
+      /*
+       * query の戻り値を scratch にすると、
+       * 次回 query で書き換わってしまうため、
+       * 戻り値だけは独立した object を生成する。
+       *
+       * 以前: query ごとに最大5個生成
+       * 現在: query ごとに1個生成
+       */
       let result = this.identityElement();
-      this.mergeInto(
-        result,
-        leftResult,
-        rightResult
-      );
+      mergeInto(result,leftResult,rightResult);
       return result;
     }
     let leftResult = this.identityElement();
     let rightResult = this.identityElement();
     while (left < right) {
-      if (left&1) {
-        leftResult = this.merge!(
-          leftResult,
-          this.data[left++]
-        );
-      }
-      if (right&1) {
-        rightResult = this.merge!(
-          this.data[--right],
-          rightResult
-        );
-      }
+      if (left&1) leftResult = this.merge!(leftResult,this.data[left++]);
+      if (right&1) rightResult = this.merge!(this.data[--right],rightResult);
       left >>= 1;
       right >>= 1;
     }
@@ -3777,9 +3840,9 @@ class LazySegtree<S = number, F = number> {
    * 使い方: seg.apply(i,f) / seg.apply(l,r,f)
    * 計算量: O(log N)
    */
-  apply(index: number, func: F): void;
-  apply(left: number, right: number, func: F): void;
-  apply(arg1: number, arg2: number | F, arg3?: F): void {
+  apply(index:number,func:F): void;
+  apply(left:number,right:number,func:F): void;
+  apply(arg1:number,arg2:number | F,arg3?:F): void {
     if (arg3 === undefined) {
       // 単一要素への適用: apply(index, func)
       let index = arg1;
@@ -3801,13 +3864,7 @@ class LazySegtree<S = number, F = number> {
       let left = arg1;
       let right = arg2 as number;
       const func = arg3 as F;
-      if (
-        !(
-          0 <= left
-          && left <= right
-          && right <= this.leafCount
-        )
-      ) {
+      if (!(0 <= left && left <= right && right <= this.leafCount)) {
         throw new Error("Out of range");
       }
       if (left === right) return;
@@ -3815,26 +3872,16 @@ class LazySegtree<S = number, F = number> {
       right += this.treeCapacity;
       // 1. 影響を受ける範囲の遅延を上から下に伝搬
       for (let i = this.treeHeight; i >= 1; i--) {
-        if (((left>>i)<<i) !== left) {
-          this.pushDown(left>>i);
-        }
-        if (((right>>i)<<i) !== right) {
-          this.pushDown(
-            (right-1)>>i
-          );
-        }
+        if (((left>>i)<<i) !== left) this.pushDown(left>>i);
+        if (((right>>i)<<i) !== right) this.pushDown((right-1)>>i);
       }
       // 2. 対象となる区間に操作を適用
       {
         const initialLeft = left;
         const initialRight = right;
         while (left < right) {
-          if (left&1) {
-            this.applyAt(left++,func);
-          }
-          if (right&1) {
-            this.applyAt(--right,func);
-          }
+          if (left&1) this.applyAt(left++,func);
+          if (right&1) this.applyAt(--right,func);
           left >>= 1;
           right >>= 1;
         }
@@ -3843,17 +3890,13 @@ class LazySegtree<S = number, F = number> {
       }
       // 3. 変更されたノードから親に向かって値を更新
       for (let i = 1; i <= this.treeHeight; i++) {
-        if (((left>>i)<<i) !== left) {
-          this.updateNode(left>>i);
-        }
-        if (((right>>i)<<i) !== right) {
-          this.updateNode((right-1)>>i);
-        }
+        if (((left>>i)<<i) !== left) this.updateNode(left>>i);
+        if (((right>>i)<<i) !== right) this.updateNode((right-1)>>i);
       }
     }
   }
 
-  private validateIndexInclusive(index: number): void {
+  private validateIndexInclusive(index:number): void {
     if (!(0 <= index && index <= this.leafCount)) {
       throw new Error("Index out of range (inclusive)");
     }
@@ -3863,14 +3906,12 @@ class LazySegtree<S = number, F = number> {
    * 左端 left を固定し、条件 check(merge(data[left...right-1])) が true となる最大の right を返す
    * O(log n)
    */
-  max_right(left: number, check: (value: S) => boolean): number {
-    this.validateIndexInclusive(left); // true は boundary check (nまでOK)
+  max_right(left:number,check:(value:S) => boolean): number {
+    this.validateIndexInclusive(left);
     if (!check(this.identityElement())) {
       throw new Error("check(identityElement) must be true.");
     }
-    if (left === this.leafCount) {
-      return this.leafCount;
-    }
+    if (left === this.leafCount) return this.leafCount;
     left += this.treeCapacity;
     // 探索開始位置までの遅延を解消
     for (let i = this.treeHeight; i >= 1; i--) {
@@ -3882,25 +3923,15 @@ class LazySegtree<S = number, F = number> {
       let tmp = this.identityElement();
       do {
         // 2のべき乗の区間を利用して右へ進む
-        while (left%2 === 0) {
-          left >>= 1;
-        }
-        this.mergeInto(
-          tmp,
-          currentSum,
-          this.data[left]
-        );
+        while (left%2 === 0) left >>= 1;
+        this.mergeInto(tmp,currentSum,this.data[left]);
         // もしこのノードを足しても条件を満たすなら、次のノードへ
         if (!check(tmp)) {
           // 条件を満たさなくなるノードを見つけたら、その子ノードへ潜って境界を探す
           while (left < this.treeCapacity) {
             this.pushDown(left);
             left = 2*left; // 左の子へ
-            this.mergeInto(
-              tmp,
-              currentSum,
-              this.data[left]
-            );
+            this.mergeInto(tmp,currentSum,this.data[left]);
             if (check(tmp)) {
               let t = currentSum;
               currentSum = tmp;
@@ -3920,30 +3951,14 @@ class LazySegtree<S = number, F = number> {
     let currentSum = this.identityElement();
     do {
       // 2のべき乗の区間を利用して右へ進む
-      while (left%2 === 0) {
-        left >>= 1;
-      }
+      while (left%2 === 0) left >>= 1;
       // もしこのノードを足しても条件を満たすなら、次のノードへ
-      if (
-        !check(
-          this.merge!(
-            currentSum,
-            this.data[left]
-          )
-        )
-      ) {
+      if (!check(this.merge!(currentSum,this.data[left]))) {
         // 条件を満たさなくなるノードを見つけたら、その子ノードへ潜って境界を探す
         while (left < this.treeCapacity) {
           this.pushDown(left);
           left = 2*left; // 左の子へ
-          if (
-            check(
-              this.merge!(
-                currentSum,
-                this.data[left]
-              )
-            )
-          ) {
+          if (check(this.merge!(currentSum,this.data[left]))) {
             currentSum = this.merge!(currentSum,this.data[left]);
             left++; // 右の子へ移動
           }
@@ -3960,7 +3975,7 @@ class LazySegtree<S = number, F = number> {
    * 右端 right を固定し、条件 check(merge(data[left...right-1])) が true となる最小の left を返す
    * O(log n)
    */
-  min_left(right: number, check: (value: S) => boolean): number {
+  min_left(right:number,check:(value:S) => boolean): number {
     this.validateIndexInclusive(right);
     if (!check(this.identityElement())) {
       throw new Error("check(identityElement) must be true.");
@@ -3977,23 +3992,13 @@ class LazySegtree<S = number, F = number> {
       let tmp = this.identityElement();
       do {
         right--;
-        while (right > 1 && (right%2)) {
-          right >>= 1;
-        }
-        this.mergeInto(
-          tmp,
-          this.data[right],
-          currentSum
-        );
+        while (right > 1 && (right%2)) right >>= 1;
+        this.mergeInto(tmp,this.data[right],currentSum);
         if (!check(tmp)) {
           while (right < this.treeCapacity) {
             this.pushDown(right);
             right = 2*right+1; // 右の子へ
-            this.mergeInto(
-              tmp,
-              this.data[right],
-              currentSum
-            );
+            this.mergeInto(tmp,this.data[right],currentSum);
             if (check(tmp)) {
               let t = currentSum;
               currentSum = tmp;
@@ -4012,9 +4017,7 @@ class LazySegtree<S = number, F = number> {
     let currentSum = this.identityElement();
     do {
       right--;
-      while (right > 1 && (right%2)) {
-        right >>= 1;
-      }
+      while (right > 1 && (right%2)) right >>= 1;
       if (!check(this.merge!(this.data[right],currentSum))) {
         while (right < this.treeCapacity) {
           this.pushDown(right);
@@ -4031,7 +4034,7 @@ class LazySegtree<S = number, F = number> {
     return 0;
   }
 
-  private validateIndex(index: number): void {
+  private validateIndex(index:number): void {
     if (!(0 <= index && index < this.leafCount)) {
       throw new Error("Index out of range");
     }
@@ -9605,6 +9608,447 @@ class SmallestPrimeFactor {
       result.push([p,count]);
     }
     return result;
+  }
+}
+
+/**
+ * 説明:
+ *   可変長 BitSet。
+ *   Uint32Array を使い、32bit ごとにまとめてビット演算する。
+ *
+ *   集合演算、部分和DP、グラフの隣接集合などに使用する。
+ *
+ * 使い方:
+ *   let bs = new BitSet(N);
+ *   bs.set(i);
+ *   bs.reset(i);
+ *   bs.test(i);
+ *
+ *   bs.or(other);
+ *   bs.and(other);
+ *   bs.xor(other);
+ *
+ *   let shifted = bs.shiftLeft(k);
+ *   bs.orShiftLeft(k); // bs |= bs << k
+ *
+ * 計算量:
+ *   set/reset/test O(1)
+ *   and/or/xor O(N/32)
+ *   shift O(N/32)
+ *   count O(N/32)
+ *
+ * メモリ:
+ *   O(N/32)
+ * 
+ * 用例: ABC274-D
+ */
+class BitSet {
+  // ビット数
+  public readonly n: number;
+
+  // 32bit ごとのブロック数
+  public readonly wordLength: number;
+
+  // data[i] が bit [32*i,32*i+32) を持つ
+  private readonly data: Uint32Array;
+
+  /**
+   * 説明: n bit の BitSet を生成する。初期値はすべて 0
+   * 使い方: new BitSet(N)
+   * 計算量: O(N/32)
+   */
+  constructor(n: number) {
+    this.n = n;
+    this.wordLength = Math.ceil(n/32);
+    this.data = new Uint32Array(this.wordLength);
+  }
+
+  /**
+   * 説明: 最後のブロックの未使用bitを0にする
+   */
+  private trim(): void {
+    if (this.wordLength == 0) return;
+    let rem = this.n&31;
+    if (rem == 0) return;
+    let mask = 0xffffffff >>> (32-rem);
+    this.data[this.wordLength-1] &= mask;
+  }
+
+  /**
+   * 説明: 32bit整数のpopcount
+   */
+  private static popcount32(x: number): number {
+    x -= (x >>> 1)&0x55555555;
+    x = (x&0x33333333)+((x >>> 2)&0x33333333);
+    x = (x+(x >>> 4))&0x0f0f0f0f;
+    return Math.imul(x,0x01010101) >>> 24;
+  }
+
+  /**
+   * 説明: i 番目のbitを1にする
+   * 使い方: bs.set(i)
+   * 計算量: O(1)
+   */
+  set(i: number): void {
+    this.data[i >>> 5] |= 1 << (i&31);
+  }
+
+  /**
+   * 説明: i 番目のbitを0にする
+   * 使い方: bs.reset(i)
+   * 計算量: O(1)
+   */
+  reset(i: number): void {
+    this.data[i >>> 5] &= ~(1 << (i&31));
+  }
+
+  /**
+   * 説明: i 番目のbitを反転する
+   * 使い方: bs.flip(i)
+   * 計算量: O(1)
+   */
+  flip(i: number): void {
+    this.data[i >>> 5] ^= 1 << (i&31);
+  }
+
+  /**
+   * 説明: i 番目のbitが1ならtrue
+   * 使い方: bs.test(i)
+   * 計算量: O(1)
+   */
+  test(i: number): boolean {
+    return (this.data[i >>> 5]&(1 << (i&31))) != 0;
+  }
+
+  /**
+   * 説明: すべてのbitを0にする
+   * 使い方: bs.clear()
+   * 計算量: O(N/32)
+   */
+  clear(): void {
+    this.data.fill(0);
+  }
+
+  /**
+   * 説明: すべてのbitを1にする
+   * 使い方: bs.fill()
+   * 計算量: O(N/32)
+   */
+  fill(): void {
+    this.data.fill(0xffffffff);
+    this.trim();
+  }
+
+  /**
+   * 説明: BitSetを複製する
+   * 使い方: let cp=bs.clone()
+   * 計算量: O(N/32)
+   */
+  clone(): BitSet {
+    let res = new BitSet(this.n);
+    res.data.set(this.data);
+    return res;
+  }
+
+  /**
+   * 説明: this &= other
+   * 使い方: bs.and(other)
+   * 計算量: O(N/32)
+   */
+  and(other: BitSet): this {
+    if (this.n != other.n) {
+      throw new Error("BitSet size mismatch");
+    }
+    for (let i = 0; i < this.wordLength; i++) {
+      this.data[i] &= other.data[i];
+    }
+    return this;
+  }
+
+  /**
+   * 説明: this |= other
+   * 使い方: bs.or(other)
+   * 計算量: O(N/32)
+   */
+  or(other: BitSet): this {
+    if (this.n != other.n) {
+      throw new Error("BitSet size mismatch");
+    }
+    for (let i = 0; i < this.wordLength; i++) {
+      this.data[i] |= other.data[i];
+    }
+    return this;
+  }
+
+  /**
+   * 説明: this ^= other
+   * 使い方: bs.xor(other)
+   * 計算量: O(N/32)
+   */
+  xor(other: BitSet): this {
+    if (this.n != other.n) {
+      throw new Error("BitSet size mismatch");
+    }
+    for (let i = 0; i < this.wordLength; i++) {
+      this.data[i] ^= other.data[i];
+    }
+    this.trim();
+    return this;
+  }
+
+  /**
+   * 説明: this と other の共通する1bitの個数を返す
+   * 使い方: bs.andCount(other)
+   * 計算量: O(N/32)
+   */
+  andCount(other: BitSet): number {
+    if (this.n != other.n) {
+      throw new Error("BitSet size mismatch");
+    }
+    let res = 0;
+    for (let i = 0; i < this.wordLength; i++) {
+      res += BitSet.popcount32(
+        this.data[i]&other.data[i]
+      );
+    }
+    return res;
+  }
+
+  /**
+   * 説明: this と other に共通する1bitが存在するか
+   * 使い方: bs.intersects(other)
+   * 計算量: O(N/32)
+   */
+  intersects(other: BitSet): boolean {
+    if (this.n != other.n) {
+      throw new Error("BitSet size mismatch");
+    }
+    for (let i = 0; i < this.wordLength; i++) {
+      if ((this.data[i]&other.data[i]) != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 説明: 1になっているbit数を返す
+   * 使い方: bs.count()
+   * 計算量: O(N/32)
+   */
+  count(): number {
+    let res = 0;
+    for (let i = 0; i < this.wordLength; i++) {
+      res += BitSet.popcount32(this.data[i]);
+    }
+    return res;
+  }
+
+  /**
+   * 説明: 1のbitが1つでも存在するか
+   * 使い方: bs.any()
+   * 計算量: O(N/32)
+   */
+  any(): boolean {
+    for (let i = 0; i < this.wordLength; i++) {
+      if (this.data[i] != 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 説明: すべてのbitが0か
+   * 使い方: bs.none()
+   * 計算量: O(N/32)
+   */
+  none(): boolean {
+    return !this.any();
+  }
+
+  /**
+   * 説明: this と other が完全に同じか
+   * 使い方: bs.equals(other)
+   * 計算量: O(N/32)
+   */
+  equals(other: BitSet): boolean {
+    if (this.n != other.n) return false;
+    for (let i = 0; i < this.wordLength; i++) {
+      if (this.data[i] != other.data[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 説明: k bit 左シフトした新しい BitSet を返す
+   * 使い方: let t=bs.shiftLeft(k)
+   * 計算量: O(N/32)
+   */
+  shiftLeft(k: number): BitSet {
+    let res = this.clone();
+    res.shiftLeftInPlace(k);
+    return res;
+  }
+
+  /**
+   * 説明: k bit 右シフトした新しい BitSet を返す
+   * 使い方: let t=bs.shiftRight(k)
+   * 計算量: O(N/32)
+   */
+  shiftRight(k: number): BitSet {
+    let res = this.clone();
+    res.shiftRightInPlace(k);
+    return res;
+  }
+
+  /**
+   * 説明: this <<= k
+   * 使い方: bs.shiftLeftInPlace(k)
+   * 計算量: O(N/32)
+   */
+  shiftLeftInPlace(k: number): this {
+    if (k <= 0) return this;
+    if (k >= this.n) {
+      this.clear();
+      return this;
+    }
+    let wordShift = k >>> 5;
+    let bitShift = k&31;
+    for (let i = this.wordLength-1; i >= 0; i--) {
+      let src = i-wordShift;
+      let value = 0;
+      if (src >= 0) {
+        value = (this.data[src] << bitShift) >>> 0;
+        if (bitShift != 0 && src > 0) {
+          value |= this.data[src-1] >>> (32-bitShift);
+        }
+      }
+      this.data[i] = value >>> 0;
+    }
+    this.trim();
+    return this;
+  }
+
+  /**
+   * 説明: this >>= k
+   * 使い方: bs.shiftRightInPlace(k)
+   * 計算量: O(N/32)
+   */
+  shiftRightInPlace(k: number): this {
+    if (k <= 0) return this;
+    if (k >= this.n) {
+      this.clear();
+      return this;
+    }
+    let wordShift = k >>> 5;
+    let bitShift = k&31;
+    for (let i = 0; i < this.wordLength; i++) {
+      let src = i+wordShift;
+      let value = 0;
+      if (src < this.wordLength) {
+        value = this.data[src] >>> bitShift;
+        if (
+          bitShift != 0
+          && src+1 < this.wordLength
+        ) {
+          value |= (
+            this.data[src+1] << (32-bitShift)
+          ) >>> 0;
+        }
+      }
+      this.data[i] = value >>> 0;
+    }
+    this.trim();
+    return this;
+  }
+
+  /**
+   * 説明:
+   *   this |= this << k
+   *   部分和DPなどで使用する。
+   *   一時 BitSet を生成しない。
+   *
+   * 使い方:
+   *   bs.orShiftLeft(x)
+   *
+   * 計算量: O(N/32)
+   */
+  orShiftLeft(k: number): this {
+    if (k <= 0 || k >= this.n) return this;
+    let wordShift = k >>> 5;
+    let bitShift = k&31;
+    for (
+      let i = this.wordLength-1;
+      i >= wordShift;
+      i--
+    ) {
+      let src = i-wordShift;
+      let value =
+        (this.data[src] << bitShift) >>> 0;
+      if (bitShift != 0 && src > 0) {
+        value |=
+          this.data[src-1] >>> (32-bitShift);
+      }
+      this.data[i] |= value;
+    }
+    this.trim();
+    return this;
+  }
+
+  /**
+   * 説明:
+   *   this |= this >> k
+   *   一時 BitSet を生成しない。
+   *
+   * 使い方:
+   *   bs.orShiftRight(x)
+   *
+   * 計算量: O(N/32)
+   */
+  orShiftRight(k: number): this {
+    if (k <= 0 || k >= this.n) return this;
+    let wordShift = k >>> 5;
+    let bitShift = k&31;
+    for (
+      let i = 0;
+      i+wordShift < this.wordLength;
+      i++
+    ) {
+      let src = i+wordShift;
+      let value =
+        this.data[src] >>> bitShift;
+      if (
+        bitShift != 0
+        && src+1 < this.wordLength
+      ) {
+        value |= (
+          this.data[src+1] << (32-bitShift)
+        ) >>> 0;
+      }
+      this.data[i] |= value;
+    }
+    this.trim();
+    return this;
+  }
+
+  /**
+   * 説明: 1になっているbit番号を昇順に配列で返す
+   * 使い方: let a=bs.toArray()
+   * 計算量: O(N/32 + 答えの個数)
+   */
+  toArray(): number[] {
+    let res: number[] = [];
+    for (let w = 0; w < this.wordLength; w++) {
+      let x = this.data[w];
+      while (x != 0) {
+        let bit = 31-Math.clz32(x&-x);
+        let idx = (w << 5)+bit;
+        if (idx < this.n) res.push(idx);
+        x = (x&(x-1)) >>> 0;
+      }
+    }
+    return res;
   }
 }
 

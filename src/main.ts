@@ -269,62 +269,121 @@ function enumDiv(n: any) {
   return res;
 }
 
-// https://atcoder.jp/users/nanana1o
 declare global {
   interface Number {
-    add(a: number): number
-    sub(a: number): number
-    mul(a: number): number
-    pow(n: number | bigint): number
-    div(a: number): number
+    add(a:number): number
+    sub(a:number): number
+    mul(a:number): number
+    pow(n:number | bigint): number
+    div(a:number): number
   }
 }
 
-function useModint(M: number) {
-  Number.prototype.add = function (a: number) {
-    const t = (+this + a) % M
-    return t < 0 ? t + M : t
+function useModint(M:number) {
+  /*
+   * 0 <= a,b < M, M < 2^30 のとき高速な mod 乗算。
+   *
+   * a*b 自体は MAX_SAFE_INTEGER を超えることがあるが、
+   * q=floor(a*b/M) は誤差が高々ごく小さいため
+   * 真の商との差は高々1。
+   *
+   * Math.imul で積の下位32bitを正確に求め、
+   * 最後の差が (-M,2M) に収まることを利用して
+   * 正確な余りを復元する。
+   */
+  let mulMod: (a:number,b:number) => number;
+  if (M < (1<<30)) {
+    mulMod = (a:number,b:number): number => {
+      let q = Math.floor(a*b/M);
+      let r = (Math.imul(a,b)-Math.imul(q,M))|0;
+      if (r < 0) r += M;
+      else if (r >= M) r -= M;
+      return r;
+    };
+  } else {
+    // 従来版
+    mulMod = (a:number,b:number): number => {
+      let t = a*b;
+      if (t <= Number.MAX_SAFE_INTEGER) return t%M;
+      return ((((a>>16)*b)%M)*65536+(a&65535)*b)%M;
+    };
   }
-  Number.prototype.sub = function (a: number) {
-    const t = (+this - a) % M
-    return t < 0 ? t + M : t
-  }
-  Number.prototype.mul = function (a: number) {
-    const s = +this
-    const t = s * a
-    return t <= Number.MAX_SAFE_INTEGER
-      ? t % M
-      : ((((s >> 16) * a) % M) * 65536 + (s & 65535) * a) % M
-  }
-  Number.prototype.pow = function (n: number | bigint) {
-    let x = +this
-    let r = 1
+
+  /*
+   * add/sub は通常、
+   * 両方とも既に [0,M) に正規化されているため
+   * % を使わず1回の補正で済む。
+   *
+   * 範囲外の値が渡された場合だけ % にフォールバックする。
+   */
+  Number.prototype.add = function(a:number) {
+    let t = +this+a;
+    if (0 <= t && t < M) return t;
+    if (M <= t && t < 2*M) return t-M;
+    if (-M <= t && t < 0) return t+M;
+    t %= M;
+    return t < 0 ? t+M : t;
+  };
+
+  Number.prototype.sub = function(a:number) {
+    let t = +this-a;
+    if (0 <= t && t < M) return t;
+    if (M <= t && t < 2*M) return t-M;
+    if (-M <= t && t < 0) return t+M;
+    t %= M;
+    return t < 0 ? t+M : t;
+  };
+
+  Number.prototype.mul = function(a:number) {
+    return mulMod(+this,a);
+  };
+
+  /*
+   * pow 内では x.mul(x) とせず、
+   * mulMod を直接呼ぶ。
+   *
+   * public API は a.pow(n) のままだが、
+   * 内部では Number.prototype 経由の呼び出しを避ける。
+   */
+  Number.prototype.pow = function(n:number | bigint) {
+    let x = +this;
+    x %= M;
+    if (x < 0) x += M;
+    let r = 1;
     if (typeof n == "number") {
       if (!Number.isSafeInteger(n) || n < 0) {
-        throw new RangeError(
-          "exponent must be a non-negative safe integer"
-        );
+        throw new RangeError("exponent must be a non-negative safe integer");
       }
-      for (
-        ;
-        n > 0;
-        x = x.mul(x), n = Math.floor(n/2)
-      ) {
-        if (n%2 == 1) r = r.mul(x)
+      while (n > 0) {
+        if (n%2 == 1) r = mulMod(r,x);
+        x = mulMod(x,x);
+        n = Math.floor(n/2);
       }
     } else {
       if (n < 0n) {
         throw new RangeError("exponent must be non-negative");
       }
-      for (; n; x = x.mul(x), n >>= 1n) {
-        if (n&1n) r = r.mul(x)
+      while (n > 0n) {
+        if (n&1n) r = mulMod(r,x);
+        x = mulMod(x,x);
+        n >>= 1n;
       }
     }
-    return r
-  }
-  Number.prototype.div = function (a: number) {
-    return this.mul(a.pow(M - 2))
-  }
+    return r;
+  };
+
+  Number.prototype.div = function(a:number) {
+    let x = a%M;
+    if (x < 0) x += M;
+    let n = M-2;
+    let r = 1;
+    while (n > 0) {
+      if (n%2 == 1) r = mulMod(r,x);
+      x = mulMod(x,x);
+      n = Math.floor(n/2);
+    }
+    return mulMod(+this,r);
+  };
 }
 
 /**
@@ -3516,7 +3575,7 @@ class Segtree<S> {
 }
 
 /**
- * ABC357 F
+ * ABC322 F
  */
 interface LazySegTreeParams<S,F> {
   op?: OperatorType<S>

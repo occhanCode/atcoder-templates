@@ -10112,6 +10112,231 @@ class BitSet {
 }
 
 /**
+ * 説明:
+ *   差分制約（Difference Constraints / 牛ゲー）を扱う。
+ *
+ *   各変数 x[i] に対して、
+ *     x[j]-x[i] <= c
+ *     x[j]-x[i] >= c
+ *     x[j]-x[i] == c
+ *   の形の制約を追加できる。
+ *
+ *   x[j]-x[i] <= c を x[j] <= x[i]+c
+ *   と読み替え、頂点 i から j へ重み c の辺を張ることで、
+ *   Bellman-Ford の最短路問題として処理する。
+ *
+ *   source を基準に解いたとき、
+ *     dist[v] = x[v]-x[source] が取りうる最大値となる。
+ *
+ *   また、負閉路が存在する場合は制約同士が矛盾している。
+ *
+ *   区間和を累積和に変換した後の制約や、
+ *   時刻・位置・順序などの差に上限/下限がある問題で有効。
+ *
+ * 使い方:
+ *
+ *   let dc = new DifferenceConstraints(N);
+ *
+ *   // x[3]-x[1] <= 5
+ *   dc.addLeq(1,3,5);
+ *
+ *   // x[4]-x[2] >= 7
+ *   dc.addGeq(2,4,7);
+ *
+ *   // x[5]-x[0] == 10
+ *   dc.addEq(0,5,10);
+ *
+ *   // 頂点0を基準として解く
+ *   let res = dc.solveFrom(0);
+ *
+ *   if (res.negativeCycle) {
+ *     // source から到達可能な制約に矛盾あり
+ *   } else {
+ *     // dist[v] は x[v]-x[0] の最大値
+ *   }
+ *
+ *   // 制約系全体に矛盾がないかだけ調べる
+ *   let ok = dc.isFeasible();
+ *
+ * 計算量:
+ *   制約追加: O(1)
+ *   solveFrom: O(VE)
+ *   isFeasible: O(VE)
+ *
+ *   V = 変数数
+ *   E = 追加した差分制約から作られる辺数
+ * 
+ * 用例: ABC404-G
+ */
+class DifferenceConstraints {
+  private from:number[] = [];
+  private to:number[] = [];
+  private cost:number[] = [];
+
+  constructor(public readonly n:number) {}
+
+  /**
+   * 説明:
+   *   x[j]-x[i] <= c を追加する。
+   *
+   *   x[j] <= x[i]+c なので、i -> j に重み c の辺を張る。
+   *
+   * 使い方:
+   *   dc.addLeq(i,j,c)
+   *
+   * 計算量: O(1)
+   */
+  addLeq(i:number,j:number,c:number):this {
+    this.from.push(i);
+    this.to.push(j);
+    this.cost.push(c);
+    return this;
+  }
+
+  /**
+   * 説明:
+   *   x[j]-x[i] >= c を追加する。
+   *
+   *   符号を反転すると、
+   *     x[i]-x[j] <= -c
+   *   なので、j -> i に重み -c の辺を張る。
+   *
+   * 使い方:
+   *   dc.addGeq(i,j,c)
+   *
+   * 計算量: O(1)
+   */
+  addGeq(i:number,j:number,c:number):this {
+    return this.addLeq(j,i,-c);
+  }
+
+  /**
+   * 説明:
+   *   x[j]-x[i] == c を追加する。
+   *
+   *   等式は、
+   *     x[j]-x[i] <= c
+   *     x[j]-x[i] >= c
+   *   の2本の不等式として追加する。
+   *
+   * 使い方:
+   *   dc.addEq(i,j,c)
+   *
+   * 計算量: O(1)
+   */
+  addEq(i:number,j:number,c:number):this {
+    this.addLeq(i,j,c);
+    this.addLeq(j,i,-c);
+    return this;
+  }
+
+  /**
+   * 説明:
+   *   source を基準として差分制約を解く。
+   *
+   *   負閉路が存在しない場合、
+   *   dist[v] は x[v]-x[source] が取りうる最大値を表す。
+   *
+   *   source から到達不能な頂点は Infinity のままとなり、
+   *   source との差に有限の上界が存在しないことを表す。
+   *
+   *   source から到達可能な負閉路が存在する場合、
+   *   その範囲の差分制約は矛盾している。
+   *
+   * 使い方:
+   *   let {dist,negativeCycle} = dc.solveFrom(source)
+   *
+   * 計算量: O(VE)
+   */
+  solveFrom(source:number):{
+    dist:number[],
+    negativeCycle:boolean
+  } {
+    let dist = Array(this.n).fill(Infinity);
+    dist[source] = 0;
+    let E = this.from.length;
+    for (let k = 0; k < this.n; k++) {
+      let updated = false;
+      for (let e = 0; e < E; e++) {
+        let u = this.from[e];
+        let v = this.to[e];
+        if (dist[u] == Infinity) continue;
+        let nd = dist[u]+this.cost[e];
+        if (nd < dist[v]) {
+          dist[v] = nd;
+          updated = true;
+          // V回目にも更新できる
+          // -> sourceから到達可能な負閉路が存在
+          if (k == this.n-1) {
+            return {
+              dist,
+              negativeCycle:true
+            };
+          }
+        }
+      }
+      // 更新がなければこれ以上変化しない
+      if (!updated) {
+        return {
+          dist,
+          negativeCycle:false
+        };
+      }
+    }
+    return {
+      dist,
+      negativeCycle:false
+    };
+  }
+
+  /**
+   * 説明:
+   *   差分制約系全体に矛盾が存在しないか判定する。
+   *
+   *   仮想的な超始点を用意して、
+   *   すべての頂点へ重み0の辺を張った Bellman-Ford
+   *   と同じ処理を行う。
+   *
+   *   そのため dist を全頂点0で初期化するだけで、
+   *   グラフのどの連結成分にある負閉路も検出できる。
+   *
+   *   true:
+   *     すべての制約を同時に満たせる
+   *
+   *   false:
+   *     負閉路が存在し、制約に矛盾がある
+   *
+   * 使い方:
+   *   let ok = dc.isFeasible()
+   *
+   * 計算量: O(VE)
+   */
+  isFeasible():boolean {
+    let dist = Array(this.n).fill(0);
+    let E = this.from.length;
+    for (let k = 0; k < this.n; k++) {
+      let updated = false;
+      for (let e = 0; e < E; e++) {
+        let u = this.from[e];
+        let v = this.to[e];
+        let nd = dist[u]+this.cost[e];
+        if (nd < dist[v]) {
+          dist[v] = nd;
+          updated = true;
+          // V回目にも更新
+          // -> 負閉路が存在
+          if (k == this.n-1) {
+            return false;
+          }
+        }
+      }
+      if (!updated) return true;
+    }
+    return true;
+  }
+}
+
+/**
  * 2次元幾何ライブラリ
  *
  * 命名:

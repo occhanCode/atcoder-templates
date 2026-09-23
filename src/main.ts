@@ -7837,6 +7837,29 @@ class PeriodicPrefixSum {
   }
 }
 
+/**
+ * DigitDP の状態遷移関数。
+ *
+ * state:
+ *   現在までの桁を見たときの「数の性質」を表す状態。
+ * digit:
+ *   今から追加する1桁。
+ *   10進数なら 0～9。
+ * pos:
+ *   現在処理している桁位置。
+ *   最上位桁から 0-indexed。
+ *
+ * 返り値:
+ *   digit を追加した後の state。
+ *   -1 を返すと、
+ *   「この digit を置く遷移は禁止」
+ *   として無視される。
+ *
+ * 注意:
+ *   「すでに上限未満か？」という smaller / tight 状態は
+ *   DigitDP 側で自動的に管理するため、
+ *   通常は state に含めなくてよい。
+ */
 type DigitDPNext = (
   state: number,
   digit: number,
@@ -7844,26 +7867,73 @@ type DigitDPNext = (
 ) => number;
 
 type DigitDPRunOptions<T> = {
-  // 状態数
+  /**
+   * state の総数。
+   *
+   * 例:
+   *   「4または9を使ったか」
+   *   state=0: まだ使っていない
+   *   state=1: すでに使った
+   *   なので stateCount=2。
+   */
   stateCount: number;
 
-  // 初期状態
+  /**
+   * 何も桁を見ていない最初の state。
+   *
+   * 例:
+   *   「4または9を使ったか」なら
+   *   最初はまだ使っていないので 0。
+   */
   initState: number;
 
-  // 未到達値
+  /**
+   * DP上の「未到達値」を生成する。
+   *
+   * 例:
+   *   数え上げなら 0
+   *   最大化なら -Infinity
+   *   最小化なら Infinity
+   */
   zero: () => T;
 
-  // 初期値
+  /**
+   * DP開始時の値。
+   *
+   * 例:
+   *   数え上げなら1通りから始まるので 1。
+   */
   initial: () => T;
 
-  // 同じ状態への遷移をまとめる
+  /**
+   * 同じ状態に複数経路から到達したときの結合方法。
+   *
+   * 例:
+   *   数え上げ: a+b
+   *   最大化: Math.max(a,b)
+   *   最小化: Math.min(a,b)
+   */
   merge: (a: T, b: T) => T;
 
-  // 次状態
-  // 遷移不可なら -1
+  /**
+   * digit を1桁追加した後の state を返す。
+   * 遷移禁止なら -1。
+   *
+   * smaller はライブラリが管理するので、
+   * ここでは「数そのものの性質」の更新を書く。
+   */
   next: DigitDPNext;
 
-  // 1桁追加したときの値変換
+  /**
+   * digit を1桁追加したときに、
+   * DP値そのものも更新したい場合に使う。
+   * 省略した場合は value をそのまま引き継ぐ。
+   *
+   * 例:
+   *   桁和をDP値として持つ
+   *   数値そのものを構築する
+   *   コストを加算する
+   */
   move?: (
     value: T,
     state: number,
@@ -7871,31 +7941,176 @@ type DigitDPRunOptions<T> = {
     pos: number
   ) => T;
 
-  // 未到達状態をスキップしたい場合
+  /**
+   * 未到達状態を高速にスキップしたい場合に指定。
+   *
+   * 例:
+   *   数え上げなら value == 0
+   *   最大化なら value == -Infinity
+   */
   isZero?: (value: T) => boolean;
 };
 
 /**
  * 説明:
- *   上限以下の整数に対する桁DP。
- *   smaller の管理を内部で行う。
+ *   0 以上 upper 以下の整数を対象にした桁DP。
+ *   「upper 以下」という制約に必要な
+ *     ・今まで upper と完全一致している
+ *     ・すでに upper より小さくなっている
+ *   という smaller / tight の管理を
+ *   ライブラリ内部で自動的に行う。
  *
- *   dp[0] = 上限と一致
- *   dp[1] = すでに上限未満
+ * --------------------------------------------------
+ * 基本的な考え方
+ * --------------------------------------------------
  *
- * 使い方:
- *   let ddp = new DigitDP(N);
+ * 利用者が考えるのは基本的に
+ *   「左から桁を決めていったとき、
+ *     何を覚えておけば最後に判定できるか？」
+ * だけ。
+ * その「覚えておく情報」を state にする。
  *
- *   ddp.count(...)
- *   ddp.countBigInt(...)
- *   ddp.run<T>(...)
+ * 例1:
+ *   「4または9を1回以上含むか」
+ *     state=0:
+ *       まだ4,9を使っていない
+ *     state=1:
+ *       すでに4または9を使った
+ *   遷移:
+ *     (state,digit) => {
+ *       if (state == 1) return 1;
+ *       if (digit == 4 || digit == 9) return 1;
+ *       return 0;
+ *     }
  *
- * 注意:
- *   next は次状態を返す。
- *   遷移不可なら -1 を返す。
+ * 例2:
+ *   「各桁の和 mod K」
+ *     state = 現在までの桁和 mod K
+ *   遷移:
+ *     (state,digit) => {
+ *       return (state+digit)%K;
+ *     }
  *
- *   先頭0、started、余りなどは
- *   必要に応じて state に含める。
+ * 例3:
+ *   「数そのもの mod K」
+ *     state = 現在までに作った数 mod K
+ *   遷移:
+ *     (state,digit) => {
+ *       return (state*10+digit)%K;
+ *     }
+ *
+ * --------------------------------------------------
+ * smaller は自分で持たなくてよい
+ * --------------------------------------------------
+ *
+ * 例えば upper=325 のとき、
+ *   2xx
+ * まで決めた時点で、
+ * すでに 325 より小さいことが確定している。
+ * その後は残りの桁に 0～9 を自由に置ける。
+ * 一方、
+ *   32x
+ * なら最後の桁は 0～5 に制限される。
+ * この判定はすべて DigitDP 内部で行う。
+ * そのため利用者の state に
+ *   tight
+ *   smaller
+ *   less
+ * などを入れる必要はない。
+ *
+ * --------------------------------------------------
+ * 返り値の読み方
+ * --------------------------------------------------
+ *
+ * count / countBigInt / run の返り値は
+ *   dp[0][state]
+ *   dp[1][state]
+ * の2種類。
+ *   dp[0][state]:
+ *     最終的に upper と完全一致したもの。
+ *   dp[1][state]:
+ *     最終的に upper より小さかったもの。
+ * したがって
+ *   「0以上 upper 以下で state=s の個数」
+ * が欲しいなら、
+ *   dp[0][s] + dp[1][s]
+ * とする。
+ *
+ * --------------------------------------------------
+ * 先頭0について
+ * --------------------------------------------------
+ *
+ * 桁DPでは短い数を先頭0付きで表現する。
+ * 例えば upper=9999 なら、
+ *   37
+ * は内部では
+ *   0037
+ * として扱われる。
+ * これで問題ない性質なら、
+ * started 状態は不要。
+ *
+ * 例:
+ *   ・4または9を含むか
+ *   ・桁和
+ *   ・数 mod K
+ * など。
+ * 一方、
+ *   ・桁数を数える
+ *   ・最初の非0桁を見る
+ *   ・0を「実際に書かれた桁」として区別する
+ * 場合は、
+ *   started=false / true
+ * も state に含める。
+ *
+ * --------------------------------------------------
+ * 使い分け
+ * --------------------------------------------------
+ *
+ * count:
+ *   number で単純に個数を数える。
+ *   答えが Number.MAX_SAFE_INTEGER 以下、
+ *   または mod を取る場合に使う。
+ * countBigInt:
+ *   bigint で個数を正確に数える。
+ *   10^18 付近まで全整数を数えるような問題では
+ *   こちらを使う。
+ * run<T>:
+ *   個数以外の値をDPしたいときに使う。
+ *   最大値、最小値、桁和の総和など。
+ *
+ * --------------------------------------------------
+ * 区間 [L,R] を数える場合
+ * --------------------------------------------------
+ *
+ * 桁DPは基本的に
+ *   f(X) = 0以上X以下の答え
+ * を求める。
+ * したがって [L,R] は
+ *   f(R)-f(L-1)
+ * とする。
+ *
+ * --------------------------------------------------
+ * ABC007-D の例
+ * --------------------------------------------------
+ *
+ * 「4または9を含む数」を数える。
+ * let f = (X:bigint) => {
+ *   if (X < 0n) return 0n;
+ *   let ddp = new DigitDP(X.toString());
+ *   let dp = ddp.countBigInt(
+ *     2,
+ *     0,
+ *     (state,digit) => {
+ *       if (state == 1) return 1;
+ *       if (digit == 4 || digit == 9) return 1;
+ *       return 0;
+ *     }
+ *   );
+ *   return dp[0][1]+dp[1][1];
+ * };
+ *
+ * 計算量:
+ *   O(桁数 × stateCount × base)
  */
 class DigitDP {
   readonly digits: number[];
@@ -7903,23 +8118,33 @@ class DigitDP {
 
   /**
    * 説明:
-   *   上限の桁列から構築する。
+   *   DPの上限となる数を設定する。
+   * value:
+   *   上限の各桁。
+   * base:
+   *   基数。省略時は10進数。
    *
    * 使い方:
-   *   new DigitDP("12345")
-   *   new DigitDP([1,0,1],2)
+   *   // 0～12345
+   *   let ddp = new DigitDP("12345");
+   *   // 2進数で 0～101101
+   *   let ddp = new DigitDP(
+   *     [1,0,1,1,0,1],
+   *     2
+   *   );
+   *
+   * 注意:
+   *   bigint を直接渡すのではなく、
+   *     new DigitDP(X.toString())
+   *   のように文字列にして渡せる。
    */
   constructor(
     value: string | ArrayLike<number>,
     base = 10
   ) {
     this.base = base;
-
     if (typeof value == "string") {
-      this.digits = Array.from(
-        value,
-        x => Number(x)
-      );
+      this.digits = Array.from(value,x => Number(x));
     } else {
       this.digits = Array.from(value);
     }
@@ -7927,26 +8152,52 @@ class DigitDP {
 
   /**
    * 説明:
-   *   number で数え上げDPを行う。
+   *   number で「条件を満たす数の個数」を数える。
    *
-   *   mod > 0 なら mod を取る。
-   *   mod == 0 なら通常加算。
+   * 引数:
+   * stateCount:
+   *   state の総数。
+   * initState:
+   *   まだ1桁も選んでいないときの state。
+   * next:
+   *   現在の state に digit を追加した後の
+   *   state を返す関数。
+   *   -1 を返すとその遷移は禁止。
+   * mod:
+   *   0:
+   *     通常の整数加算。
+   *   1以上:
+   *     個数を mod で管理する。
    *
    * 返り値:
-   *   dp[0][state] = 上限と一致
-   *   dp[1][state] = 上限未満
+   *   dp[0][state]
+   *     upper と完全一致する数の個数。
+   *   dp[1][state]
+   *     upper より小さい数の個数。
+   * したがって、
+   *   0 <= x <= upper
+   * 全体から state=s の個数が欲しければ
+   *   dp[0][s]+dp[1][s]
+   * とする。
    *
-   * 使い方:
-   *   let dp = ddp.count(
-   *     D,
-   *     0,
-   *     (state,digit,pos) => ...
-   *   );
+   * 例:
+   *   4または9を含む数
+   * let dp = ddp.count(
+   *   2,
+   *   0,
+   *   (state,digit) => {
+   *     if (state == 1) return 1;
+   *     return digit == 4 || digit == 9
+   *       ? 1
+   *       : 0;
+   *   }
+   * );
+   * let ans = dp[0][1]+dp[1][1];
    *
    * 計算量:
-   *   O(桁数 × 状態数 × base)
-   *
-   * 用例: ABC336-E
+   *   O(桁数 × stateCount × base)
+   * 
+   * 用例: ABC029-D
    */
   count(
     stateCount: number,
@@ -7954,32 +8205,45 @@ class DigitDP {
     next: DigitDPNext,
     mod = 0
   ): number[][] {
+    // dp[less][state]
+    // less=0:
+    //   ここまで upper と完全一致
+    // less=1:
+    //   すでに upper より小さい
     let dp = [
       new Float64Array(stateCount),
       new Float64Array(stateCount)
     ];
+    // まだ何も桁を置いていない状態は1通り
     dp[0][initState] = 1;
+    // 最上位桁から順に決める
     for (let pos = 0; pos < this.digits.length; pos++) {
       let ndp = [
         new Float64Array(stateCount),
         new Float64Array(stateCount)
       ];
+      // upper の現在桁
       let limit = this.digits[pos];
       for (let less = 0; less < 2; less++) {
-        let maxDigit =
-          less == 1
-            ? this.base-1
-            : limit;
+        // すでに upper 未満なら
+        // 0～base-1 を自由に置ける。
+        // まだ一致中なら
+        // 0～limit までしか置けない。
+        let maxDigit = less == 1 ? this.base-1 : limit;
         for (let state = 0; state < stateCount; state++) {
           let cur = dp[less][state];
           if (cur == 0) continue;
           for (let digit = 0; digit <= maxDigit; digit++) {
+            // 利用者が定義した
+            // 「数の性質」の状態遷移
             let ns = next(state,digit,pos);
+            // -1ならこのdigitは置けない
             if (ns < 0) continue;
-            let nl =
-              less == 1 || digit < limit
-                ? 1
-                : 0;
+            // 次の smaller 状態。
+            // すでに小さかった場合、
+            // または今回 limit より小さい digit を置いた場合、
+            // 以降は upper 未満が確定する。
+            let nl = less == 1 || digit < limit ? 1 : 0;
             if (mod == 0) {
               ndp[nl][ns] += cur;
             } else {
@@ -8002,14 +8266,35 @@ class DigitDP {
 
   /**
    * 説明:
-   *   bigint で正確に数え上げDPを行う。
+   *   count の bigint 版。
+   *   「何通りあるか」を正確な整数で数える。
+   *   10^18 以下の整数を数えるような問題では、
+   *   個数が Number.MAX_SAFE_INTEGER を超える可能性があるため
+   *   count ではなくこちらを使う。
+   *
+   * 引数:
+   *   count と同じ。
    *
    * 返り値:
-   *   dp[0][state] = 上限と一致
-   *   dp[1][state] = 上限未満
+   *   dp[0][state]
+   *     upper と完全一致する数の個数。
+   *   dp[1][state]
+   *     upper より小さい数の個数。
+   *
+   * 典型:
+   * let dp = ddp.countBigInt(
+   *   stateCount,
+   *   initState,
+   *   next
+   * );
+   * let ans =
+   *   dp[0][goalState]
+   *   +dp[1][goalState];
    *
    * 計算量:
-   *   O(桁数 × 状態数 × base)
+   *   O(桁数 × stateCount × base)
+   * 
+   * 用例: ABC007-D
    */
   countBigInt(
     stateCount: number,
@@ -8028,20 +8313,14 @@ class DigitDP {
       ];
       let limit = this.digits[pos];
       for (let less = 0; less < 2; less++) {
-        let maxDigit =
-          less == 1
-            ? this.base-1
-            : limit;
+        let maxDigit = less == 1 ? this.base-1 : limit;
         for (let state = 0; state < stateCount; state++) {
           let cur = dp[less][state];
           if (cur == 0n) continue;
           for (let digit = 0; digit <= maxDigit; digit++) {
             let ns = next(state,digit,pos);
             if (ns < 0) continue;
-            let nl =
-              less == 1 || digit < limit
-                ? 1
-                : 0;
+            let nl = less == 1 || digit < limit ? 1 : 0;
             ndp[nl][ns] += cur;
           }
         }
@@ -8053,88 +8332,64 @@ class DigitDP {
 
   /**
    * 説明:
-   *   任意型 T を値として持つ汎用桁DP。
+   *   個数ではなく、任意型 T を値として持つ汎用桁DP。
+   * count / countBigInt では
+   *   「何通りあるか」
+   * を自動的に加算する。
+   * run<T> はその部分まで利用者側で指定できる。
    *
-   *   数え上げだけでなく、
-   *   最大化、最小化、集計値DPなどに使える。
+   * 主な用途:
+   *   ・条件を満たす数の最大値
+   *   ・条件を満たす数の最小値
+   *   ・全数の桁和の総和
+   *   ・各数に対するコストの最大/最小
+   * opt.zero:
+   *   未到達状態の値。
+   * opt.initial:
+   *   初期DP値。
+   * opt.merge:
+   *   同じ状態への複数の遷移をどうまとめるか。
+   * opt.next:
+   *   state の遷移。
+   * opt.move:
+   *   digit を置いたときにDP値自体をどう変えるか。
+   * opt.isZero:
+   *   未到達状態を判定してスキップしたい場合に使う。
    *
    * 返り値:
-   *   dp[0][state] = 上限と一致
-   *   dp[1][state] = 上限未満
+   *   dp[0][state]
+   *     upper と一致
+   *   dp[1][state]
+   *     upper 未満
    *
    * 計算量:
-   *   O(桁数 × 状態数 × base)
+   *   O(桁数 × stateCount × base)
    */
-  run<T>(
-    opt: DigitDPRunOptions<T>
-  ): T[][] {
+  run<T>(opt: DigitDPRunOptions<T>): T[][] {
     let dp = [
-      Array.from(
-        {length: opt.stateCount},
-        opt.zero
-      ),
-      Array.from(
-        {length: opt.stateCount},
-        opt.zero
-      )
+      Array.from({length: opt.stateCount},opt.zero),
+      Array.from({length: opt.stateCount},opt.zero)
     ];
     dp[0][opt.initState] = opt.initial();
     for (let pos = 0; pos < this.digits.length; pos++) {
       let ndp = [
-        Array.from(
-          {length: opt.stateCount},
-          opt.zero
-        ),
-        Array.from(
-          {length: opt.stateCount},
-          opt.zero
-        )
+        Array.from({length: opt.stateCount},opt.zero),
+        Array.from({length: opt.stateCount},opt.zero)
       ];
       let limit = this.digits[pos];
       for (let less = 0; less < 2; less++) {
-        let maxDigit =
-          less == 1
-            ? this.base-1
-            : limit;
-        for (
-          let state = 0;
-          state < opt.stateCount;
-          state++
-        ) {
+        let maxDigit = less == 1 ? this.base-1 : limit;
+        for (let state = 0; state < opt.stateCount; state++) {
           let cur = dp[less][state];
-          if (
-            opt.isZero
-            && opt.isZero(cur)
-          ) {
+          if (opt.isZero && opt.isZero(cur)) {
             continue;
           }
-          for (
-            let digit = 0;
-            digit <= maxDigit;
-            digit++
-          ) {
-            let ns = opt.next(
-              state,
-              digit,
-              pos
-            );
+          for (let digit = 0; digit <= maxDigit; digit++) {
+            let ns = opt.next(state,digit,pos);
             if (ns < 0) continue;
-            let nl =
-              less == 1 || digit < limit
-                ? 1
-                : 0;
-            let value = opt.move
-              ? opt.move(
-                  cur,
-                  state,
-                  digit,
-                  pos
-                )
-              : cur;
-            ndp[nl][ns] = opt.merge(
-              ndp[nl][ns],
-              value
-            );
+            let nl = less == 1 || digit < limit ? 1 : 0;
+            let value = opt.move ? opt.move(cur,state,digit,pos) : cur;
+            ndp[nl][ns] = opt.merge(ndp[nl][ns],value);
           }
         }
       }

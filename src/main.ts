@@ -4798,6 +4798,7 @@ function topologicalSort(
  * 説明: 有向グラフの強連結成分分解。縮約 DAG も作る
  * 使い方: scc.addEdge(u,v); let groups=scc.build()
  * 計算量: O(N+M)
+ * 用例: ABC478-E
  */
 class SCC {
   G: number[][];
@@ -10589,6 +10590,378 @@ class DifferenceConstraints {
     }
     return true;
   }
+}
+
+// ========================================
+// Combinatorial Game Utilities
+// ========================================
+
+// 既存テンプレートの以下を利用する:
+//   type U64 = [number,number];
+//   function topologicalSort(G: number[][]): TopologicalSortResult;
+
+/**
+ * 説明:
+ *   unsigned 64bit 整数の XOR 線形基底。
+ *   値は既存 U64 と同じく hi,lo の 32bit x 2 で扱う。
+ *
+ * 使い方:
+ *   let basis = new XorBasis64();
+ *   basis.add(hi,lo);
+ *   basis.has(hi,lo);
+ *   basis.rank();
+ *   let [mh,ml] = basis.maxXor();
+ *   let [nh,nl] = basis.minXor(hi,lo);
+ *   basis.merge(other);
+ *
+ * 計算量:
+ *   add/has/maxXor/minXor O(64)
+ *   merge O(64^2)
+ *   clear O(64)
+ *
+ * 注意:
+ *   signed 64bit ではなく unsigned 64bit。
+ *   内部では BigInt を使用しない。
+ */
+class XorBasis64 {
+  private basisHi = new Uint32Array(64);
+  private basisLo = new Uint32Array(64);
+  private used = new Uint8Array(64);
+  private rankValue = 0;
+
+  /**
+   * 基底を空に戻す
+   */
+  clear(): void {
+    this.basisHi.fill(0);
+    this.basisLo.fill(0);
+    this.used.fill(0);
+    this.rankValue = 0;
+  }
+
+  /**
+   * 線形独立なベクトル数
+   */
+  rank(): number {
+    return this.rankValue;
+  }
+
+  /**
+   * x=(hi,lo) を追加する。
+   * rank が増えたら true、従属なら false。
+   */
+  add(hi: number,lo: number): boolean {
+    hi >>>= 0;
+    lo >>>= 0;
+    for (let bit = 63; bit >= 0; bit--) {
+      let on = bit >= 32
+        ? (hi>>>(bit-32))&1
+        : (lo>>>bit)&1;
+      if (!on) continue;
+      if (!this.used[bit]) {
+        this.used[bit] = 1;
+        this.basisHi[bit] = hi;
+        this.basisLo[bit] = lo;
+        this.rankValue++;
+        return true;
+      }
+      hi = (hi^this.basisHi[bit])>>>0;
+      lo = (lo^this.basisLo[bit])>>>0;
+    }
+    return false;
+  }
+
+  /**
+   * x=(hi,lo) が現在の基底の線形包に含まれるか
+   */
+  has(hi: number,lo: number): boolean {
+    hi >>>= 0;
+    lo >>>= 0;
+    for (let bit = 63; bit >= 0; bit--) {
+      let on = bit >= 32
+        ? (hi>>>(bit-32))&1
+        : (lo>>>bit)&1;
+      if (!on) continue;
+      if (!this.used[bit]) return false;
+      hi = (hi^this.basisHi[bit])>>>0;
+      lo = (lo^this.basisLo[bit])>>>0;
+    }
+    return true;
+  }
+
+  /**
+   * x XOR y を最大化する y を線形包から選び、
+   * 最大値を U64 で返す。
+   * x 省略時は線形包内の最大値。
+   */
+  maxXor(hi = 0,lo = 0): U64 {
+    hi >>>= 0;
+    lo >>>= 0;
+    for (let bit = 63; bit >= 0; bit--) {
+      if (!this.used[bit]) continue;
+      let nh = (hi^this.basisHi[bit])>>>0;
+      let nl = (lo^this.basisLo[bit])>>>0;
+      if (nh > hi || (nh == hi && nl > lo)) {
+        hi = nh;
+        lo = nl;
+      }
+    }
+    return [hi,lo];
+  }
+
+  /**
+   * x XOR y を最小化する y を線形包から選び、
+   * 最小値を U64 で返す。
+   * x 省略時は常に 0。
+   */
+  minXor(hi = 0,lo = 0): U64 {
+    hi >>>= 0;
+    lo >>>= 0;
+    for (let bit = 63; bit >= 0; bit--) {
+      if (!this.used[bit]) continue;
+      let nh = (hi^this.basisHi[bit])>>>0;
+      let nl = (lo^this.basisLo[bit])>>>0;
+      if (nh < hi || (nh == hi && nl < lo)) {
+        hi = nh;
+        lo = nl;
+      }
+    }
+    return [hi,lo];
+  }
+
+  /**
+   * other の線形包を this にマージする
+   */
+  merge(other: XorBasis64): void {
+    for (let bit = 63; bit >= 0; bit--) {
+      if (!other.used[bit]) continue;
+      this.add(other.basisHi[bit],other.basisLo[bit]);
+    }
+  }
+}
+
+/**
+ * 説明:
+ *   timestamp 配列を利用して mex を高速に求める。
+ *   Set の生成を避けたい Grundy DP 向け。
+ *
+ * 使い方1:
+ *   let mex = new MexStamp();
+ *   let x = mex.mex([0,1,3]); // 2
+ *
+ * 使い方2:
+ *   mex.begin(G[v].length);
+ *   for (let to of G[v]) mex.add(grundy[to]);
+ *   grundy[v] = mex.value();
+ *
+ * 計算量:
+ *   mex(values) O(values.length)
+ *   begin O(1) amortized
+ *   add O(1)
+ *   value O(valueCount)
+ *
+ * 注意:
+ *   begin(valueCount) の valueCount は、
+ *   この回に add する値の個数を指定する。
+ *   mex は高々 valueCount なので、
+ *   valueCount より大きい値は記録しない。
+ */
+class MexStamp {
+  private seen: Int32Array;
+  private stamp = 0;
+  private limit = 0;
+
+  constructor(maxValue = 0) {
+    this.seen = new Int32Array(
+      Math.max(1,maxValue+1)
+    );
+  }
+
+  private ensure(size: number): void {
+    if (this.seen.length >= size) return;
+    let n = this.seen.length;
+    while (n < size) n *= 2;
+    let next = new Int32Array(n);
+    next.set(this.seen);
+    this.seen = next;
+  }
+
+  /**
+   * 新しい mex 計算を開始する
+   */
+  begin(valueCount: number): void {
+    if (valueCount < 0 || !Number.isInteger(valueCount)) {
+      throw new RangeError("MexStamp.begin: valueCount must be a non-negative integer");
+    }
+    this.ensure(valueCount+1);
+    if (this.stamp == 0x7fffffff) {
+      this.seen.fill(0);
+      this.stamp = 1;
+    } else {
+      this.stamp++;
+    }
+    this.limit = valueCount;
+  }
+
+  /**
+   * 現在の集合へ x を追加する
+   */
+  add(x: number): void {
+    if (0 <= x && x <= this.limit) {
+      this.seen[x] = this.stamp;
+    }
+  }
+
+  /**
+   * 現在追加済みの値の mex を返す
+   */
+  value(): number {
+    for (let x = 0; x <= this.limit; x++) {
+      if (this.seen[x] != this.stamp) {
+        return x;
+      }
+    }
+    return this.limit+1;
+  }
+
+  /**
+   * 配列・TypedArray の mex を一発で求める
+   */
+  mex(values: ArrayLike<number>): number {
+    this.begin(values.length);
+    for (let i = 0; i < values.length; i++) {
+      this.add(values[i]);
+    }
+    return this.value();
+  }
+}
+
+/**
+ * 有向グラフ上の通常プレイゲームの状態
+ *
+ * Lose:
+ *   最善を尽くしても負ける
+ *
+ * Draw:
+ *   両者が最善を尽くしたとき、
+ *   勝ちを強制できず無限に続けられる
+ *
+ * Win:
+ *   勝ちを強制できる
+ */
+enum GameResult {
+  Lose = -1,
+  Draw = 0,
+  Win = 1,
+}
+
+/**
+ * 説明:
+ *   有向グラフ上で、
+ *   手番ごとに辺を1本選んで移動し、
+ *   動けない側が負けるゲームについて、
+ *   各頂点を Win/Lose/Draw に分類する。
+ *
+ *   後退解析:
+ *     Lose へ行ける頂点 -> Win
+ *     全ての行き先が Win -> Lose
+ *     最後まで未確定 -> Draw
+ *
+ * 使い方:
+ *   let result = solveWinLoseDraw(G);
+ *   if (result[s] == GameResult.Win) ...
+ *
+ * 計算量:
+ *   O(V+E)
+ *
+ * メモリ:
+ *   O(V+E)
+ */
+function solveWinLoseDraw(
+  G: number[][]
+): Int8Array {
+  let N = G.length;
+  let rev = Array.from({length:N},() => [] as number[]);
+  let remain = new Int32Array(N);
+  for (let v = 0; v < N; v++) {
+    remain[v] = G[v].length;
+    for (let to of G[v]) {
+      rev[to].push(v);
+    }
+  }
+  let result = new Int8Array(N);
+  let que = new Int32Array(N);
+  let head = 0;
+  let tail = 0;
+  for (let v = 0; v < N; v++) {
+    if (remain[v] == 0) {
+      result[v] = GameResult.Lose;
+      que[tail++] = v;
+    }
+  }
+  while (head < tail) {
+    let v = que[head++];
+    if (result[v] == GameResult.Lose) {
+      // Lose へ1手で行けるなら Win
+      for (let from of rev[v]) {
+        if (result[from] != GameResult.Draw) continue;
+        result[from] = GameResult.Win;
+        que[tail++] = from;
+      }
+    } else {
+      // Win への辺を1本消す。
+      // 全て Win なら Lose。
+      for (let from of rev[v]) {
+        if (result[from] != GameResult.Draw) continue;
+        remain[from]--;
+        if (remain[from] == 0) {
+          result[from] = GameResult.Lose;
+          que[tail++] = from;
+        }
+      }
+    }
+  }
+  // 未確定の 0 はそのまま Draw
+  return result;
+}
+
+/**
+ * 説明:
+ *   DAG 上の impartial game の Grundy 数を全頂点について求める。
+ *   v から to へ移動できるゲームを想定する。
+ *
+ * 使い方:
+ *   let grundy = grundyDAG(G);
+ *   if (grundy[start] != 0) ...
+ *
+ * 計算量:
+ *   O(V+E)
+ *
+ * メモリ:
+ *   O(V)
+ *
+ * 注意:
+ *   閉路を含むグラフには使えない。
+ *   閉路がある場合は例外を投げる。
+ */
+function grundyDAG(
+  G: number[][]
+): Int32Array {
+  let topo = topologicalSort(G);
+  if (!topo.isDAG) {
+    throw new Error("grundyDAG: graph must be a DAG");
+  }
+  let grundy = new Int32Array(G.length);
+  let mex = new MexStamp();
+  for (let i = topo.order.length-1; i >= 0; i--) {
+    let v = topo.order[i];
+    mex.begin(G[v].length);
+    for (let to of G[v]) {
+      mex.add(grundy[to]);
+    }
+    grundy[v] = mex.value();
+  }
+  return grundy;
 }
 
 /**

@@ -623,6 +623,23 @@ function u64Xor(
 }
 
 /**
+ * unsigned 64bit を1bit右シフト
+ * 計算量 O(1)
+ */
+function u64Shr1(
+  hi:number,
+  lo:number
+): U64 {
+  return [
+    hi>>>1,
+    (
+      (lo>>>1)
+      |((hi&1)<<31)
+    )>>>0
+  ];
+}
+
+/**
  * uint32 * uint32 を正確な uint64 にする。
  *
  * a,b は 0 <= a,b < 2^32。

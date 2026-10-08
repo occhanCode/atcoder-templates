@@ -237,6 +237,19 @@ function extGcdBigInt(
   ];
 }
 
+/**
+ * 説明:
+ *   0以上N以下の素数をエラトステネスの篩で列挙する。
+ *
+ * 使い方:
+ *   let primes = eratosthenesPrime(N);
+ *
+ * 計算量:
+ *   O(N log log N)
+ *
+ * メモリ:
+ *   O(N)
+ */
 function eratosthenesPrime(N = 10**6) {
   if (N < 2) return [];
   let b = Array<boolean>(N+1).fill(true);
@@ -255,6 +268,115 @@ function eratosthenesPrime(N = 10**6) {
     }
   }
   return prime;
+}
+
+/**
+ * 説明:
+ *   巨大な数値範囲の短い区間 [L,R] を篩う区間篩。
+ *
+ * 使い方:
+ *   let ss = new SegmentedSieve(L,R);
+ *
+ *   // L+i が素数か
+ *   let isPrime = ss.primeFlags();
+ *
+ *   // L+i の素因数 p^e を列挙
+ *   ss.forEachFactor((i,p,e) => {
+ *     let x = L+i;
+ *   });
+ *
+ * 計算量:
+ *   前計算 O(sqrt(R) log log R)
+ *   primeFlags O((R-L+1) log log R)
+ *   forEachFactor O((R-L+1) log log R) 程度
+ * 
+ * 用例: ABC227-G,ABC412-E
+ */
+class SegmentedSieve {
+  readonly left: number;
+  readonly right: number;
+  readonly length: number;
+  private primes: number[];
+
+  constructor(
+    left: number,
+    right: number
+  ) {
+    if (
+      !Number.isSafeInteger(left)
+      || !Number.isSafeInteger(right)
+      || left < 0
+      || right < left
+    ) {
+      throw new RangeError("0 <= left <= right must be safe integers");
+    }
+    this.left = left;
+    this.right = right;
+    this.length = right-left+1;
+    this.primes = eratosthenesPrime(Math.floor(Math.sqrt(right)));
+  }
+
+  /**
+   * isPrime[i]:
+   *   left+i が素数なら1、そうでなければ0。
+   */
+  primeFlags(): Uint8Array {
+    let res = new Uint8Array(this.length);
+    res.fill(1);
+    if (this.left == 0) {
+      if (0 <= this.right) res[0] = 0;
+      if (1 <= this.right) res[1] = 0;
+    } else if (this.left == 1) {
+      res[0] = 0;
+    }
+    for (let p of this.primes) {
+      let start = Math.max(p*p,Math.ceil(this.left/p)*p);
+      for (let x = start; x <= this.right; x += p) {
+        res[x-this.left] = 0;
+      }
+    }
+    return res;
+  }
+
+  /**
+   * 区間内の各整数を素因数分解する。
+   *
+   * callback(i,p,e):
+   *   left+i が p^e を素因数に持つ。
+   *
+   * 同じ p について callback は1回だけ呼ばれる。
+   */
+  forEachFactor(
+    callback: (
+      index: number,
+      prime: number,
+      exponent: number
+    ) => void
+  ): void {
+    let rest = new Float64Array(this.length);
+    for (let i = 0; i < this.length; i++) {
+      rest[i] = this.left+i;
+    }
+    for (let p of this.primes) {
+      let start = Math.ceil(this.left/p)*p;
+      for (let x = start; x <= this.right; x += p) {
+        let i = x-this.left;
+        if (rest[i] <= 1) continue;
+        if (rest[i]%p != 0) continue;
+        let e = 0;
+        while (rest[i]%p == 0) {
+          rest[i] /= p;
+          e++;
+        }
+        callback(i,p,e);
+      }
+    }
+    for (let i = 0; i < this.length; i++) {
+      if (rest[i] > 1) {
+        callback(i,rest[i],1);
+      }
+    }
+  }
 }
 
 // ソートなし約数列挙
@@ -8414,6 +8536,448 @@ class DigitDP {
       dp = ndp;
     }
     return dp;
+  }
+}
+
+type TravelingSalesmanResult = {
+  // 最小コスト。
+  // 条件を満たす経路が存在しない場合は Infinity。
+  cost: number;
+
+  // restore=true のときのみ返す。
+  // 条件を満たす経路が存在しなければ []。
+  route?: number[];
+};
+
+type TravelingSalesmanOptions = {
+  /**
+   * 始点。
+   * number:
+   *   指定頂点から開始する。
+   * null:
+   *   始点を自由に選ぶ。
+   * 省略:
+   *   0から開始する。
+   */
+  start?: number | null;
+
+  /**
+   * 終点。
+   * number:
+   *   指定頂点で終了する。
+   * null / 省略:
+   *   終点を自由に選ぶ。
+   * cycle=true のときは指定できない。
+   */
+  end?: number | null;
+
+  /**
+   * true:
+   *   全頂点を訪問したあと始点へ戻る。
+   * false / 省略:
+   *   始点へ戻らない。
+   */
+  cycle?: boolean;
+
+  /**
+   * true:
+   *   最小コストだけでなく経路も復元する。
+   * false / 省略:
+   *   コストだけ求める。
+   * restore=true では parent 配列を持つため
+   * 追加メモリを使用する。
+   */
+  restore?: boolean;
+};
+
+/**
+ * ==================================================
+ * TravelingSalesman
+ * ==================================================
+ *
+ * bit DP による巡回セールスマン問題。
+ *
+ * N個の頂点があり、
+ *   cost[i][j]
+ * を「頂点iから頂点jへ移動するコスト」とする。
+ *
+ * 全頂点をちょうど1回ずつ訪問する経路について、
+ * 最小コストを求める。
+ *
+ * 設定によって、
+ *   ・巡回セールスマン問題
+ *   ・Hamiltonian Path
+ *   ・始点固定 / 自由
+ *   ・終点固定 / 自由
+ * をすべて扱える。
+ *
+ * 有向グラフでも無向グラフでもよい。
+ *
+ * 移動できない辺は
+ *   Infinity
+ * としておけばよい。
+ *
+ * --------------------------------------------------
+ * DPの意味
+ * --------------------------------------------------
+ *
+ * 内部では
+ *   dp[mask][v]
+ * を
+ *   mask に含まれる頂点をすべて訪問済みで、
+ *   現在 v にいるときの最小コスト
+ * とする。
+ *
+ * 例えば
+ *   mask = 0b10110
+ * なら、
+ *   頂点1,2,4
+ * を訪問済み。
+ *
+ * 未訪問頂点 to に対して
+ *   dp[mask | (1<<to)][to]
+ * を更新する。
+ *
+ * --------------------------------------------------
+ * 最も普通のTSP
+ * --------------------------------------------------
+ *
+ * 0から出発して全頂点を訪問し、
+ * 最後に0へ戻る。
+ *
+ * let tsp = new TravelingSalesman(cost);
+ * let ans = tsp.solve({
+ *   start: 0,
+ *   cycle: true
+ * });
+ * println(ans.cost);
+ * 
+ * 用例: ABC180-E
+ *
+ * --------------------------------------------------
+ * 0から出発して、どこで終わってもよい
+ * --------------------------------------------------
+ *
+ * let ans = tsp.solve({
+ *   start: 0
+ * });
+ *
+ * --------------------------------------------------
+ * 0から出発してN-1で終了
+ * --------------------------------------------------
+ *
+ * let ans = tsp.solve({
+ *   start: 0,
+ *   end: N-1
+ * });
+ * 
+ * 用例: AWC0149E
+ *
+ * --------------------------------------------------
+ * 始点も終点も自由
+ * --------------------------------------------------
+ *
+ * 全頂点を1回ずつ通る最小Hamiltonian Path。
+ *
+ * let ans = tsp.solve({
+ *   start: null
+ * });
+ * 
+ * 用例: ABC073-D
+ *
+ * --------------------------------------------------
+ * 経路を復元する
+ * --------------------------------------------------
+ *
+ * let ans = tsp.solve({
+ *   start: 0,
+ *   cycle: true,
+ *   restore: true
+ * });
+ * println(ans.cost);
+ * println(ans.route!," ");
+ *
+ * 例えば
+ *   0 2 3 1 0
+ * のように返る。
+ *
+ * --------------------------------------------------
+ * 巨大グラフ中の重要地点だけ全部回る問題
+ * --------------------------------------------------
+ *
+ * 非常によくある形。
+ *
+ * 元グラフの頂点数は大きいが、
+ * 訪問必須頂点が K 個だけの場合、
+ *
+ * 1.
+ *   各重要頂点から BFS / Dijkstra
+ *
+ * 2.
+ *   重要頂点間の最短距離
+ *     cost[i][j]
+ *   を作る
+ *
+ * 3.
+ *   TravelingSalesman(cost)
+ *
+ * とする。
+ *
+ * つまり
+ *   大きなグラフ
+ *        ↓
+ *   重要地点間の距離行列
+ *        ↓
+ *   TSP
+ * という変換をする。
+ * 
+ * 用例: AWC0056-E
+ *
+ * --------------------------------------------------
+ * cycle=true について
+ * --------------------------------------------------
+ *
+ * cycle=true の場合、
+ *   start -> ... -> start
+ * という巡回路を求める。
+ *
+ * start=null の場合でも、
+ * 巡回路は回転させられるため
+ * 頂点0を始点として固定してよい。
+ *
+ * 例えば
+ *   2 -> 4 -> 1 -> 0 -> 3 -> 2
+ * という巡回路が存在すれば、
+ *   0 -> 3 -> 2 -> 4 -> 1 -> 0
+ * と同じ巡回路を0始点で表せる。
+ *
+ * --------------------------------------------------
+ * 計算量
+ * --------------------------------------------------
+ *
+ * 時間:
+ *   O(N^2 * 2^N)
+ * メモリ:
+ *   O(N * 2^N)
+ * restore=true の場合はさらに
+ *   O(N * 2^N)
+ * の親情報を持つ。
+ *
+ * --------------------------------------------------
+ * TypeScriptでのNの目安
+ * --------------------------------------------------
+ *
+ * 理論上は bit 演算の都合で N < 31。
+ * ただし実際には dp が巨大になる。
+ *
+ * N=18:
+ *   約 4.7M 状態
+ *
+ * N=19:
+ *   約 10M 状態
+ *
+ * N=20:
+ *   約 21M 状態
+ *
+ * Float64Array は1要素8byteなので、
+ * N=20では dp だけで約160MiB。
+ *
+ * そのため実用上は
+ *   N <= 18～20 程度
+ * が目安。
+ *
+ * 制約や実行時間によっては
+ * N=20でも厳しいことがある。
+ */
+class TravelingSalesman {
+  readonly n: number;
+  readonly cost: number[][];
+
+  /**
+   * 頂点間コスト行列を受け取る。
+   * cost[i][j]:
+   *   iからjへ移動するコスト。
+   * 移動不能:
+   *   Infinity
+   */
+  constructor(cost: number[][]) {
+    this.n = cost.length;
+    for (let i = 0; i < this.n; i++) {
+      if (cost[i].length != this.n) {
+        throw new RangeError("cost must be a square matrix");
+      }
+    }
+    if (this.n >= 31) {
+      throw new RangeError("TravelingSalesman requires N < 31");
+    }
+    this.cost = cost;
+  }
+
+  /**
+   * 指定された条件で最小Hamiltonian Path / Cycleを求める。
+   *
+   * デフォルト:
+   *   start=0
+   *   end=null
+   *   cycle=false
+   *   restore=false
+   * つまり
+   *   「0から出発して全頂点を訪問し、
+   *     どこで終わってもよい」
+   * を求める。
+   */
+  solve(
+    options: TravelingSalesmanOptions = {}
+  ): TravelingSalesmanResult {
+    let start = options.start === undefined ? 0 : options.start;
+    let end = options.end === undefined ? null : options.end;
+    let cycle = options.cycle ?? false;
+    let restore = options.restore ?? false;
+    let N = this.n;
+    if (N == 0) {
+      return {
+        cost: 0,
+        route: restore ? [] : undefined
+      };
+    }
+    if (cycle && start == null) {
+      start = 0;
+    }
+    if (cycle && end != null) {
+      throw new Error("end cannot be specified when cycle=true");
+    }
+    if (start != null && (!Number.isInteger(start) || start < 0 || N <= start)) {
+      throw new RangeError("start is out of range");
+    }
+    if (end != null && (!Number.isInteger(end) || end < 0 || N <= end)) {
+      throw new RangeError("end is out of range");
+    }
+    let S = 1<<N;
+    let FULL = S-1;
+    let dp = new Float64Array(S*N);
+    dp.fill(Infinity);
+    let parent: Int8Array | undefined;
+    if (restore) {
+      parent = new Int8Array(S*N);
+      parent.fill(-2);
+    }
+    if (start == null) {
+      for (let v = 0; v < N; v++) {
+        let mask = 1<<v;
+        let idx = mask*N+v;
+        dp[idx] = 0;
+        if (parent) {
+          parent[idx] = -1;
+        }
+      }
+    } else {
+      let mask = 1<<start;
+      let idx = mask*N+start;
+      dp[idx] = 0;
+      if (parent) {
+        parent[idx] = -1;
+      }
+    }
+    for (let mask = 1; mask < S; mask++) {
+      let base = mask*N;
+      let fromBits = mask;
+      let remain = FULL^mask;
+      while (fromBits != 0) {
+        let fromBit = fromBits&-fromBits;
+        let v = 31-Math.clz32(fromBit);
+        let cur = dp[base+v];
+        if (cur != Infinity) {
+          let toBits = remain;
+          while (toBits != 0) {
+            let toBit = toBits&-toBits;
+            let to = 31-Math.clz32(toBit);
+            let c = this.cost[v][to];
+            if (c != Infinity) {
+              let nmask = mask|toBit;
+              let idx = nmask*N+to;
+              let nd = cur+c;
+              if (nd < dp[idx]) {
+                dp[idx] = nd;
+                if (parent) {
+                  parent[idx] = v;
+                }
+              }
+            }
+            toBits ^= toBit;
+          }
+        }
+        fromBits ^= fromBit;
+      }
+    }
+    let best = Infinity;
+    let last = -1;
+    if (cycle) {
+      let s = start!;
+      if (N == 1) {
+        best = 0;
+        last = s;
+      } else {
+        let base = FULL*N;
+        for (let v = 0; v < N; v++) {
+          if (v == s) continue;
+          let back = this.cost[v][s];
+          if (back == Infinity) continue;
+          let cur = dp[base+v];
+          if (cur == Infinity) continue;
+          let cand = cur+back;
+          if (cand < best) {
+            best = cand;
+            last = v;
+          }
+        }
+      }
+    } else if (end != null) {
+      best = dp[FULL*N+end];
+      if (best != Infinity) {
+        last = end;
+      }
+    } else {
+      let base = FULL*N;
+      for (let v = 0; v < N; v++) {
+        let cur = dp[base+v];
+        if (cur < best) {
+          best = cur;
+          last = v;
+        }
+      }
+    }
+    if (!restore) {
+      return {
+        cost: best
+      };
+    }
+    if (best == Infinity) {
+      return {
+        cost: Infinity,
+        route: []
+      };
+    }
+    let route: number[] = [];
+    let mask = FULL;
+    let v = last;
+    while (v != -1) {
+      route.push(v);
+      let idx = mask*N+v;
+      let pv = parent![idx];
+      mask ^= 1<<v;
+      v = pv;
+    }
+    route.reverse();
+    /*
+     * 巡回路なら最後に始点を追加。
+     */
+    if (cycle) {
+      route.push(start!);
+    }
+    return {
+      cost: best,
+      route
+    };
   }
 }
 

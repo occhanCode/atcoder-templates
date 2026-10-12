@@ -5,7 +5,81 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
-  
+  let Q = nextNum();
+  let que = [];
+  let arr = [];
+  for (let q = 0; q < Q; q++) {
+    let t = nextNum();
+    let [lh,ll] = nextU64();
+    let [rh,rl] = nextU64();
+    let [eh,el] = u64Inc(rh,rl);
+    que.push([t,lh,ll,eh,el]);
+    arr.push([lh,ll]);
+    arr.push([eh,el]);
+  }
+  let cc = new U64CoordinateCompression(arr);
+  type S = {
+    oneHi: number;
+    oneLo: number;
+    lenHi: number;
+    lenLo: number;
+  };
+  let ini = [];
+  for (let i = 0; i < cc.size()-1; i++) {
+    let [ah,al] = cc.value(i);
+    let [bh,bl] = cc.value(i+1);
+    let [dh,dl] = u64Sub(bh,bl,ah,al);
+    ini.push({oneHi:0,oneLo:0,lenHi:dh,lenLo:dl});
+  }
+  let seg = new LazySegtree<S,boolean>(
+    ini,
+    {
+      opInto: (out,l,r) => {
+        let lo = l.oneLo+r.oneLo;
+        let carry = lo >= U64_BASE ? 1 :0;
+        out.oneLo = lo>>>0;
+        out.oneHi = (l.oneHi+r.oneHi+carry)>>>0;
+        lo = l.lenLo+r.lenLo;
+        carry = lo >= U64_BASE ? 1 : 0;
+        out.lenLo = lo>>>0;
+        out.lenHi = (l.lenHi+r.lenHi+carry)>>>0;
+      },
+      e: () => ({
+        oneHi:0,
+        oneLo:0,
+        lenHi:0,
+        lenLo:0
+      }),
+      mapInto: (out,f,x) => {
+        let oh = x.oneHi;
+        let ol = x.oneLo;
+        let lh = x.lenHi;
+        let ll = x.lenLo;
+        out.lenHi = lh;
+        out.lenLo = ll;
+        if (!f) {
+          out.oneHi = oh;
+          out.oneLo = ol;
+          return;
+        }
+        let borrow = ll < ol ? 1 : 0;
+        out.oneLo = (ll-ol)>>>0;
+        out.oneHi = (lh-oh-borrow)>>>0;
+      },
+      cmp: (f,g) => f != g,
+      id: () => false
+    }
+  );
+  for (let [t,lh,ll,rh,rl] of que) {
+    let l = cc.index([lh,ll]);
+    let r = cc.index([rh,rl]);
+    if (t == 1) {
+      seg.apply(l,r,true);
+    } else {
+      let ans = seg.query(l,r);
+      println(u64ToBigInt(ans.oneHi,ans.oneLo));
+    }
+  }
 
   // 処理終了
 }
@@ -87,6 +161,27 @@ function nextBigInts(length: number) {
   const arr: bigint[] = [];
   for(let i = 0; i < length; ++i) arr[i] = nextBigInt();
   return arr;
+}
+function nextU64(): U64 {
+  let s = next();
+  let hi = 0;
+  let lo = 0;
+  for (let i = 0; i < s.length; i++) {
+    let d = s.charCodeAt(i)-48;
+    let t = lo*10+d;
+    lo = t>>>0;
+    hi = (
+      hi*10+intDiv(t,U64_BASE)
+    )>>>0;
+  }
+  return [hi,lo];
+}
+function u64Inc(hi: number, lo: number): U64 {
+  let nlo = (lo+1)>>>0;
+  return [
+    (hi+(nlo == 0 ? 1 : 0))>>>0,
+    nlo
+  ];
 }
 
 function print(out: string | number | bigint): void;
@@ -2708,6 +2803,70 @@ class CoordinateCompression {
   }
 
   value(index: number): number {
+    return this.values[index];
+  }
+
+  size(): number {
+    return this.values.length;
+  }
+}
+class BigIntCoordinateCompression {
+  values: bigint[];
+
+  constructor(A: bigint[]) {
+    this.values = Array.from(
+      new Set(A)
+    ).sort((a,b) => a < b ? -1 : a > b ? 1 : 0);
+  }
+
+  index(x: bigint): number {
+    return lowerBound(this.values,x);
+  }
+
+  value(index: number): bigint {
+    return this.values[index];
+  }
+
+  size(): number {
+    return this.values.length;
+  }
+}
+class U64CoordinateCompression {
+  values: U64[];
+
+  constructor(A: U64[]) {
+    A.sort((a,b) => u64Cmp(a[0],a[1],b[0],b[1]));
+    this.values = [];
+    for (let x of A) {
+      if (
+        this.values.length == 0
+        || u64Cmp(
+          this.values[this.values.length-1][0],
+          this.values[this.values.length-1][1],
+          x[0],x[1]
+        ) != 0
+      ) {
+        this.values.push(x);
+      }
+    }
+  }
+
+  index(x: U64): number {
+    let ok = this.values.length;
+    let ng = -1;
+    while (ok-ng > 1) {
+      let mid = (ok+ng)>>1;
+      let v = this.values[mid];
+      if (u64Cmp(v[0],v[1],x[0],x[1]) >= 0) {
+        ok = mid;
+      } else {
+        ng = mid;
+      }
+    }
+    return ok;
+  }
+
+  value(index: number): U64 {
     return this.values[index];
   }
 

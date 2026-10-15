@@ -5,81 +5,7 @@ import * as fs from "node:fs";
 function main() {
   // ここに処理を記述します
 
-  let Q = nextNum();
-  let que = [];
-  let arr = [];
-  for (let q = 0; q < Q; q++) {
-    let t = nextNum();
-    let [lh,ll] = nextU64();
-    let [rh,rl] = nextU64();
-    let [eh,el] = u64Inc(rh,rl);
-    que.push([t,lh,ll,eh,el]);
-    arr.push([lh,ll]);
-    arr.push([eh,el]);
-  }
-  let cc = new U64CoordinateCompression(arr);
-  type S = {
-    oneHi: number;
-    oneLo: number;
-    lenHi: number;
-    lenLo: number;
-  };
-  let ini = [];
-  for (let i = 0; i < cc.size()-1; i++) {
-    let [ah,al] = cc.value(i);
-    let [bh,bl] = cc.value(i+1);
-    let [dh,dl] = u64Sub(bh,bl,ah,al);
-    ini.push({oneHi:0,oneLo:0,lenHi:dh,lenLo:dl});
-  }
-  let seg = new LazySegtree<S,boolean>(
-    ini,
-    {
-      opInto: (out,l,r) => {
-        let lo = l.oneLo+r.oneLo;
-        let carry = lo >= U64_BASE ? 1 :0;
-        out.oneLo = lo>>>0;
-        out.oneHi = (l.oneHi+r.oneHi+carry)>>>0;
-        lo = l.lenLo+r.lenLo;
-        carry = lo >= U64_BASE ? 1 : 0;
-        out.lenLo = lo>>>0;
-        out.lenHi = (l.lenHi+r.lenHi+carry)>>>0;
-      },
-      e: () => ({
-        oneHi:0,
-        oneLo:0,
-        lenHi:0,
-        lenLo:0
-      }),
-      mapInto: (out,f,x) => {
-        let oh = x.oneHi;
-        let ol = x.oneLo;
-        let lh = x.lenHi;
-        let ll = x.lenLo;
-        out.lenHi = lh;
-        out.lenLo = ll;
-        if (!f) {
-          out.oneHi = oh;
-          out.oneLo = ol;
-          return;
-        }
-        let borrow = ll < ol ? 1 : 0;
-        out.oneLo = (ll-ol)>>>0;
-        out.oneHi = (lh-oh-borrow)>>>0;
-      },
-      cmp: (f,g) => f != g,
-      id: () => false
-    }
-  );
-  for (let [t,lh,ll,rh,rl] of que) {
-    let l = cc.index([lh,ll]);
-    let r = cc.index([rh,rl]);
-    if (t == 1) {
-      seg.apply(l,r,true);
-    } else {
-      let ans = seg.query(l,r);
-      println(u64ToBigInt(ans.oneHi,ans.oneLo));
-    }
-  }
+  
 
   // 処理終了
 }
@@ -9950,6 +9876,8 @@ class AhoCorasick {
    *   L=パターン総長、σ=alphabet.lengthとして
    *   構築 O(L*σ)
    *   メモリ O(L*σ)
+   * 
+   * 用例: ABC419-F
    */
   constructor(
     patterns: string[],
@@ -11985,6 +11913,7 @@ function geoNormalizeIntLine(line: GeoIntLine): GeoIntLine {
 /**
  * 異なる2点 p,q を通る整数係数直線を返す。
  * 計算量: O(log C)
+ * 用例: ABC422-E
  */
 function geoIntLineThroughPoints(p: GeoIntPoint, q: GeoIntPoint): GeoIntLine {
   if (p[0] == q[0] && p[1] == q[1]) {
@@ -12000,6 +11929,7 @@ function geoIntLineThroughPoints(p: GeoIntPoint, q: GeoIntPoint): GeoIntLine {
 /**
  * 点 p を直線へ代入した値 ax+by+c を返す。
  * 計算量: O(1)
+ * 用例: ABC422-E
  */
 function geoIntLineEvaluate(line: GeoIntLine, p: GeoIntPoint): bigint {
   return line.a*p[0]+line.b*p[1]+line.c;

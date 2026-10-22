@@ -1195,108 +1195,163 @@ function builtin_popcount(n: number | bigint): number {
  */
 function convolution(a: Array<number>, b: Array<number>, MOD: number): Array<number> {
   useModint(MOD);
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 || m === 0) return [];
-  // 配列サイズが小さい場合は愚直な O(N^2) 畳み込み（本家ACLの最適化）
-  if (n + m - 1 <= 60) {
-    const res = Array(n + m - 1).fill(0);
+  let n = a.length;
+  let m = b.length;
+  if (n == 0 || m == 0) return [];
+  let mulMod: (a:number,b:number) => number;
+  if (MOD < (1<<30)) {
+    mulMod = (a:number,b:number) => {
+      let q = Math.floor(a*b/MOD);
+      let r = (Math.imul(a,b)-Math.imul(q,MOD))|0;
+      if (r < 0) r += MOD;
+      else if (r >= MOD) r -= MOD;
+      return r;
+    };
+  } else {
+    mulMod = (a:number,b:number) => {
+      let t = a*b;
+      if (t <= Number.MAX_SAFE_INTEGER) {
+        return t%MOD;
+      }
+      return (
+        (((a>>16)*b)%MOD)*65536
+        +(a&65535)*b
+      )%MOD;
+    };
+  }
+  let len = n+m-1;
+  if (len <= 60) {
+    let res = Array(len).fill(0);
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < m; j++) {
-        res[i + j] = res[i + j].add(a[i].mul(b[j]));
+        let x = res[i+j]+mulMod(a[i],b[j]);
+        if (x >= MOD) x -= MOD;
+        res[i+j] = x;
       }
     }
     return res;
   }
-  const z = 1 << (32 - Math.clz32(n + m - 2));
-  const a_pad = Array(z).fill(0);
-  const b_pad = Array(z).fill(0);
-  for (let i = 0; i < n; i++) a_pad[i] = a[i];
-  for (let i = 0; i < m; i++) b_pad[i] = b[i];
-  const sum_e = Array(30);
-  const sum_ie = Array(30);
-  let nttInitialized = false;
-  let initNTT = () => {
-    if (nttInitialized) return;
-    nttInitialized = true;
-    const root = Array(30);
-    const iroot = Array(30);
-    let rank2 = 0;
-    let x = MOD-1;
-    while (x%2 == 0) {
-      rank2++;
-      x /= 2;
+  let powMod = (a:number,n:number) => {
+    let x = a%MOD;
+    if (x < 0) x += MOD;
+    let res = 1;
+    while (n > 0) {
+      if (n%2 == 1) {
+        res = mulMod(res,x);
+      }
+      x = mulMod(x,x);
+      n = Math.floor(n/2);
     }
-    if (z > 2**rank2) {
-      throw new RangeError("NTT size is not supported by this MOD");
-    }
-    root[rank2] = (3).pow((MOD-1)/2**rank2);
-    iroot[rank2] = root[rank2].pow(MOD-2);
-    for (let i = rank2 - 1; i >= 0; i--) {
-      root[i] = root[i + 1].mul(root[i + 1]);
-      iroot[i] = iroot[i + 1].mul(iroot[i + 1]);
-    }
-    let prod = 1;
-    let iprod = 1;
-    for (let i = 0; i <= rank2 - 2; i++) {
-      sum_e[i] = root[i + 2].mul(prod);
-      prod = prod.mul(iroot[i + 2]);
-      sum_ie[i] = iroot[i + 2].mul(iprod);
-      iprod = iprod.mul(root[i + 2]);
-    }
+    return res;
+  };
+  let z = 1<<(32-Math.clz32(len-1));
+  let aa = new Float64Array(z);
+  let bb = new Float64Array(z);
+  aa.set(a);
+  bb.set(b);
+  let rank2 = 0;
+  let tmp = MOD-1;
+  while (tmp%2 == 0) {
+    rank2++;
+    tmp /= 2;
   }
-  let butterfly = (arr: any) => {
-    initNTT();
-    const nn = arr.length;
-    const h = 31 - Math.clz32(nn);
+  if (z > 2**rank2) {
+    throw new RangeError("NTT size is not supported by this MOD");
+  }
+  let root = new Float64Array(rank2+1);
+  let iroot = new Float64Array(rank2+1);
+  root[rank2] = powMod(3,(MOD-1)/2**rank2);
+  iroot[rank2] = powMod(root[rank2],MOD-2 );
+  for (let i = rank2-1; i >= 0; i--) {
+    root[i] = mulMod(root[i+1],root[i+1]);
+    iroot[i] = mulMod(iroot[i+1],iroot[i+1]);
+  }
+  let sumE = new Float64Array(rank2);
+  let sumIE = new Float64Array(rank2);
+  let prod = 1;
+  let iprod = 1;
+  for (let i = 0; i <= rank2-2; i++) {
+    sumE[i] = mulMod(root[i+2],prod);
+    prod = mulMod(prod,iroot[i+2]);
+    sumIE[i] = mulMod(iroot[i+2],iprod);
+    iprod = mulMod(iprod,root[i+2]);
+  }
+
+  let butterfly = (arr: Float64Array) => {
+    let h = 31-Math.clz32(arr.length);
     for (let ph = 1; ph <= h; ph++) {
-      let w = 1 << (ph - 1), p = 1 << (h - ph);
+      let w = 1<<(ph-1);
+      let p = 1<<(h-ph);
       let now = 1;
       for (let s = 0; s < w; s++) {
-        let offset = s << (h - ph + 1);
+        let offset = s<<(h-ph+1);
         for (let i = 0; i < p; i++) {
-          let l = arr[i + offset];
-          let r = arr[i + offset + p].mul(now);
-          arr[i + offset] = l.add(r);
-          arr[i + offset + p] = l.sub(r);
+          let idx = offset+i;
+          let l = arr[idx];
+          let r = mulMod(arr[idx+p],now);
+          let x = l+r;
+          if (x >= MOD) {
+            x -= MOD;
+          }
+          let y = l-r;
+          if (y < 0) {
+            y += MOD;
+          }
+          arr[idx] = x;
+          arr[idx+p] = y;
         }
-        const not_s = ~s >>> 0;
-        const zeros = 31 - Math.clz32((not_s & -not_s) >>> 0);
-        now = now.mul(sum_e[zeros]);
+        if (s+1 < w) {
+          let notS = (~s)>>>0;
+          let low = (notS&-notS)>>>0;
+          let zeros = 31-Math.clz32(low);
+          now = mulMod(now,sumE[zeros]);
+        }
       }
     }
-  }
-  let butterfly_inv = (arr: any) => {
-    initNTT();
-    const nn = arr.length;
-    const h = 31 - Math.clz32(nn);
+  };
+
+  let butterflyInv = (arr: Float64Array) => {
+    let h = 31-Math.clz32(arr.length);
     for (let ph = h; ph >= 1; ph--) {
-      let w = 1 << (ph - 1), p = 1 << (h - ph);
+      let w = 1<<(ph-1);
+      let p = 1<<(h-ph);
       let inow = 1;
       for (let s = 0; s < w; s++) {
-        let offset = s << (h - ph + 1);
+        let offset = s<<(h-ph+1);
         for (let i = 0; i < p; i++) {
-          let l = arr[i + offset];
-          let r = arr[i + offset + p];
-          arr[i + offset] = l.add(r);
-          arr[i + offset + p] = l.sub(r).mul(inow);
+          let idx = offset+i;
+          let l = arr[idx];
+          let r = arr[idx+p];
+          let x = l+r;
+          if (x >= MOD) {
+            x -= MOD;
+          }
+          let y = l-r;
+          if (y < 0) {
+            y += MOD;
+          }
+          arr[idx] = x;
+          arr[idx+p] = mulMod(y,inow);
         }
-        const not_s = ~s >>> 0;
-        const zeros = 31 - Math.clz32((not_s & -not_s) >>> 0);
-        inow = inow.mul(sum_ie[zeros]);
+        if (s+1 < w) {
+          let notS = (~s)>>>0;
+          let low = (notS&-notS)>>>0;
+          let zeros = 31-Math.clz32(low);
+          inow = mulMod(inow,sumIE[zeros]);
+        }
       }
     }
-  }
-  butterfly(a_pad);
-  butterfly(b_pad);
+  };
+  butterfly(aa);
+  butterfly(bb);
   for (let i = 0; i < z; i++) {
-    a_pad[i] = a_pad[i].mul(b_pad[i]);
+    aa[i] = mulMod(aa[i],bb[i]);
   }
-  butterfly_inv(a_pad);
-  const iz = z.pow(MOD-2);
-  const res = Array(n + m - 1);
-  for (let i = 0; i < n + m - 1; i++) {
-    res[i] = a_pad[i].mul(iz);
+  butterflyInv(aa);
+  let iz = powMod(z,MOD-2);
+  let res = Array(len);
+  for (let i = 0; i < len; i++) {
+    res[i] = mulMod(aa[i],iz);
   }
   return res;
 }
@@ -3362,97 +3417,166 @@ class DoubleEndedPriorityQueue<T> {
 }
 
 /**
- * 説明: 固定配列で両端 push/pop を行う Deque。01-bfsのときは無理にdequeを使わず、2つの配列を使う方が速い（ABC431-E）
- * 使い方: let dq = new Deque<number>(); dq.push(x); dq.shift()
- * 計算量: 各操作 O(1)
+ * 説明:
+ *   可変長リングバッファで両端 push/pop を行う Deque。
+ *
+ * 使い方:
+ *   let dq = new Deque<number>();
+ *   dq.push(x);
+ *   dq.unshift(x);
+ *   dq.shift();
+ *   dq.pop();
+ *
+ * 計算量:
+ *   各操作 amortized O(1)
+ *
+ * メモ:
+ *   initialCapacity は初期容量。
+ *   足りなくなった場合は自動で2倍に拡張する。
+ * 
+ * 用例: ABC431-E
  */
 class Deque<T> {
   private data: (T | undefined)[];
-  private head: number;
-  private tail: number;
-  private capacity: number;
-  /**
-   * 説明: 固定容量の Deque を作ります。容量不足に注意
-   * 使い方: new Deque<T>(capacity)
-   * 計算量: O(capacity)
-   */
-  constructor(capacity: number = 1 << 20) {
-    this.capacity = capacity;
+  private head = 0;
+  private tail = 0;
+  private length = 0;
+  private mask: number;
+
+  constructor(initialCapacity: number = 16) {
+    let capacity = 1;
+    while (capacity < initialCapacity) {
+      capacity <<= 1;
+    }
     this.data = new Array(capacity);
-    this.head = capacity >> 1;
-    this.tail = capacity >> 1;
+    this.mask = capacity-1;
   }
+
   /**
-   * 説明: 末尾へ追加
-   * 使い方: dq.push(x)
-   * 計算量: O(1)
+   * 容量を2倍にする
+   * 計算量 O(size)
+   *
+   * resize 全体では amortized O(1)
+   */
+  private grow(): void {
+    let old = this.data;
+    let oldCapacity = old.length;
+    let next = new Array<T | undefined>(oldCapacity<<1);
+    let first = Math.min(this.length,oldCapacity-this.head);
+    for (let i = 0; i < first; i++) {
+      next[i] = old[this.head+i];
+    }
+    for (let i = first; i < this.length; i++) {
+      next[i] = old[i-first];
+    }
+    this.data = next;
+    this.head = 0;
+    this.tail = this.length;
+    this.mask = next.length-1;
+  }
+
+  /**
+   * 末尾へ追加
+   * 計算量 amortized O(1)
    */
   push(value: T): void {
-    this.data[this.tail++] = value;
+    if (this.length == this.data.length) {
+      this.grow();
+    }
+    this.data[this.tail] = value;
+    this.tail = (this.tail+1)&this.mask;
+    this.length++;
   }
+
   /**
-   * 説明: 先頭へ追加
-   * 使い方: dq.unshift(x)
-   * 計算量: O(1)
+   * 先頭へ追加
+   * 計算量 amortized O(1)
    */
   unshift(value: T): void {
-    this.data[--this.head] = value;
+    if (this.length == this.data.length) {
+      this.grow();
+    }
+    this.head = (this.head-1)&this.mask;
+    this.data[this.head] = value;
+    this.length++;
   }
+
   /**
-   * 説明: 先頭から取り出す
-   * 使い方: dq.shift()
-   * 計算量: O(1)
+   * 先頭から取り出す
+   * 空なら undefined
    */
   shift(): T | undefined {
-    return this.head < this.tail ? this.data[this.head++] : undefined;
+    if (this.length == 0) {
+      return undefined;
+    }
+    let value = this.data[this.head];
+    // オブジェクトへの参照を残さない
+    this.data[this.head] = undefined;
+    this.head = (this.head+1)&this.mask;
+    this.length--;
+    return value;
   }
+
   /**
-   * 説明: 末尾から取り出す
-   * 使い方: dq.pop()
-   * 計算量: O(1)
+   * 末尾から取り出す
+   * 空なら undefined
    */
   pop(): T | undefined {
-    return this.head < this.tail ? this.data[--this.tail] : undefined;
+    if (this.length == 0) {
+      return undefined;
+    }
+    this.tail = (this.tail-1)&this.mask;
+    let value = this.data[this.tail];
+    this.data[this.tail] = undefined;
+    this.length--;
+    return value;
   }
+
   /**
-   * 説明: 先頭要素を参照する
-   * 使い方: dq.peekHead()
-   * 計算量: O(1)
+   * 先頭要素
    */
   peekHead(): T | undefined {
-    return this.head < this.tail ? this.data[this.head] : undefined;
+    if (this.length == 0) {
+      return undefined;
+    }
+    return this.data[this.head];
   }
+
   /**
-   * 説明: 先頭から idx 番目を参照する
-   * 使い方: dq.peekHeadIdx(idx)
-   * 計算量: O(1)
+   * 先頭から idx 番目
    */
   peekHeadIdx(idx: number): T | undefined {
-    return this.head+idx < this.tail ? this.data[this.head+idx] : undefined;
+    if (idx < 0 || idx >= this.length) {
+      return undefined;
+    }
+    return this.data[(this.head+idx)&this.mask];
   }
+
   /**
-   * 説明: 末尾要素を参照する
-   * 使い方: dq.peekTail()
-   * 計算量: O(1)
+   * 末尾要素
    */
   peekTail(): T | undefined {
-    return this.head < this.tail ? this.data[this.tail - 1] : undefined;
+    if (this.length == 0) {
+      return undefined;
+    }
+    return this.data[(this.tail-1)&this.mask];
   }
+
   /**
-   * 説明: 末尾から idx 番目を参照する
-   * 使い方: dq.peekTailIdx(idx)
-   * 計算量: O(1)
+   * 末尾から idx 番目
    */
   peekTailIdx(idx: number): T | undefined {
-    return this.head < this.tail-idx ? this.data[this.tail-idx - 1] : undefined;
+    if (idx < 0 || idx >= this.length) {
+      return undefined;
+    }
+    return this.data[(this.tail-1-idx)&this.mask];
   }
+
   /**
-   * 説明: 現在の要素数を返す
-   * 使い方: dq.getLength()
-   * 計算量: O(1)
+   * 現在の要素数
    */
   getLength(): number {
-    return this.tail - this.head;
+    return this.length;
   }
 }
 
@@ -5636,7 +5760,7 @@ type TreeDiameterSearchResult = {
  *   getFarthest O(N)
  *   build O(N)
  * 
- * 用例: ABC267-F
+ * 用例: ABC267-F, ABC428-E
  */
 class TreeDiameter {
   G: TreeDiameterEdge[][];
@@ -5704,6 +5828,7 @@ class TreeDiameter {
         par[to] = pos;
         dist[to] = dist[pos]+edge.cost;
         que.push(to);
+        // 頂点番号がより大きいものを直径にする などタイブレークの条件がある場合はここに追加（ABC428-E）
         if (dist[to] > dist[far]) {
           far = to;
         }

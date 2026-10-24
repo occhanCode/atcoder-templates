@@ -88,6 +88,10 @@ function nextBigInts(length: number) {
   for(let i = 0; i < length; ++i) arr[i] = nextBigInt();
   return arr;
 }
+type U64 = [number,number];
+const U64_BASE = 4294967296;
+const U64_MASK_BIGINT = 0xffffffffn;
+const U64_LIMIT_BIGINT = 1n<<64n;
 function nextU64(): U64 {
   let s = next();
   let hi = 0;
@@ -591,12 +595,6 @@ function bigint_mod_pow(x: bigint, n: bigint, p: bigint) {
 // 注意:
 //   signed 64bit ではなく unsigned 64bit。
 //   0 <= x < 2^64 を対象とする。
-
-type U64 = [number,number];
-
-const U64_BASE = 4294967296;
-const U64_MASK_BIGINT = 0xffffffffn;
-const U64_LIMIT_BIGINT = 1n<<64n;
 
 /**
  * bigint -> U64

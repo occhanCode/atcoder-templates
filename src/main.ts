@@ -52,7 +52,7 @@ let dir4 = ["U","R","D","L"];
 
 // // インタラクティブ用
 // // お決まりのインプットはコメントアウト、main関数にasyncを忘れない
-// // 詳しくは典型ABC305-Fをチェック
+// // 詳しくはABC305-Fをチェック
 // const readline = require("readline");
 // const rl = readline.createInterface({
 //   input: process.stdin,

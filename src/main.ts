@@ -88,10 +88,6 @@ function nextBigInts(length: number) {
   for(let i = 0; i < length; ++i) arr[i] = nextBigInt();
   return arr;
 }
-type U64 = [number,number];
-const U64_BASE = 4294967296;
-const U64_MASK_BIGINT = 0xffffffffn;
-const U64_LIMIT_BIGINT = 1n<<64n;
 function nextU64(): U64 {
   let s = next();
   let hi = 0;
@@ -595,6 +591,12 @@ function bigint_mod_pow(x: bigint, n: bigint, p: bigint) {
 // 注意:
 //   signed 64bit ではなく unsigned 64bit。
 //   0 <= x < 2^64 を対象とする。
+
+type U64 = [number,number];
+
+const U64_BASE = 4294967296;
+const U64_MASK_BIGINT = 0xffffffffn;
+const U64_LIMIT_BIGINT = 1n<<64n;
 
 /**
  * bigint -> U64
@@ -10629,20 +10631,15 @@ class MultisetHasher {
  * メモリ:
  *   O(maxN)
  *
- * 用例: ABC368-F
+ * 用例: ABC368-F, AWC0185-E
  */
 class SmallestPrimeFactor {
   private spf: number[];
   private omega: number[];
 
   constructor(maxN: number) {
-    if (
-      !Number.isSafeInteger(maxN)
-      || maxN < 1
-    ) {
-      throw new RangeError(
-        "maxN must be a positive safe integer"
-      );
+    if (!Number.isSafeInteger(maxN) || maxN < 1) {
+      throw new RangeError("maxN must be a positive safe integer");
     }
     this.spf = Array(maxN+1).fill(0);
     this.omega = Array(maxN+1).fill(0);
@@ -10656,8 +10653,7 @@ class SmallestPrimeFactor {
       }
     }
     for (let i = 2; i <= maxN; i++) {
-      this.omega[i] =
-        this.omega[intDiv(i,this.spf[i])]+1;
+      this.omega[i] = this.omega[intDiv(i,this.spf[i])]+1;
     }
   }
 
@@ -10700,9 +10696,7 @@ class SmallestPrimeFactor {
    * 計算量:
    *   O(log n)
    */
-  factorize(
-    n: number
-  ): [number,number][] {
+  factorize(n: number): [number,number][] {
     let result: [number,number][] = [];
     while (n > 1) {
       let p = this.spf[n];
@@ -10714,6 +10708,37 @@ class SmallestPrimeFactor {
       result.push([p,count]);
     }
     return result;
+  }
+
+  /**
+   * 説明:
+   *   正整数列 A の最小公倍数を素因数分解し、
+   *   [素数,指数] の配列を返す。
+   *
+   * 例:
+   *   lcmFactorize([12,18,20])
+   *   => [[2,2],[3,2],[5,1]]
+   *
+   * 計算量:
+   *   O(sum(log A_i) + K log K)
+   *   K は登場する素数の種類数
+   * 
+   * 用例: AWC0185-E
+   */
+  lcmFactorize(A: number[]): [number,number][] {
+    if (A.length == 0) {
+      throw new RangeError("A must not be empty");
+    }
+    let exp = new Map<number,number>();
+    for (let a of A) {
+      if (!Number.isSafeInteger(a) || a < 1 || this.spf.length <= a) {
+        throw new RangeError("A[i] must be in [1,maxN]");
+      }
+      for (let [p,e] of this.factorize(a)) {
+        exp.set(p,Math.max(exp.get(p)??0,e));
+      }
+    }
+    return Array.from(exp).sort((a,b) => a[0]-b[0]);
   }
 }
 

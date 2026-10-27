@@ -88,27 +88,6 @@ function nextBigInts(length: number) {
   for(let i = 0; i < length; ++i) arr[i] = nextBigInt();
   return arr;
 }
-function nextU64(): U64 {
-  let s = next();
-  let hi = 0;
-  let lo = 0;
-  for (let i = 0; i < s.length; i++) {
-    let d = s.charCodeAt(i)-48;
-    let t = lo*10+d;
-    lo = t>>>0;
-    hi = (
-      hi*10+intDiv(t,U64_BASE)
-    )>>>0;
-  }
-  return [hi,lo];
-}
-function u64Inc(hi: number, lo: number): U64 {
-  let nlo = (lo+1)>>>0;
-  return [
-    (hi+(nlo == 0 ? 1 : 0))>>>0,
-    nlo
-  ];
-}
 
 function print(out: string | number | bigint): void;
 function print<T>(out: Array<T>, separator: string): void;
@@ -597,6 +576,28 @@ type U64 = [number,number];
 const U64_BASE = 4294967296;
 const U64_MASK_BIGINT = 0xffffffffn;
 const U64_LIMIT_BIGINT = 1n<<64n;
+
+function nextU64(): U64 {
+  let s = next();
+  let hi = 0;
+  let lo = 0;
+  for (let i = 0; i < s.length; i++) {
+    let d = s.charCodeAt(i)-48;
+    let t = lo*10+d;
+    lo = t>>>0;
+    hi = (
+      hi*10+intDiv(t,U64_BASE)
+    )>>>0;
+  }
+  return [hi,lo];
+}
+function u64Inc(hi: number, lo: number): U64 {
+  let nlo = (lo+1)>>>0;
+  return [
+    (hi+(nlo == 0 ? 1 : 0))>>>0,
+    nlo
+  ];
+}
 
 /**
  * bigint -> U64

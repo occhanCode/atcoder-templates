@@ -1133,6 +1133,38 @@ function LIS(arr: number[]) {
 }
 
 /**
+ * 説明:
+ *   2つの列の最長共通部分列(LCS)の長さを返す。
+ *   string、配列のどちらにも使える。
+ * 使い方:
+ *   let len = LCS("abab","baba");
+ *   let len = LCS([1,2,3],[2,1,3]);
+ * 計算量: O(NM)
+ * メモリ: O(min(N,M))
+ */
+function LCS<T>(A: ArrayLike<T>,B: ArrayLike<T>): number {
+  // Bを短い方にする
+  if (A.length < B.length) {
+    [A,B] = [B,A];
+  }
+  let M = B.length;
+  let dp = new Int32Array(M+1);
+  for (let i = 0; i < A.length; i++) {
+    let prev = 0;
+    for (let j = 0; j < M; j++) {
+      let old = dp[j+1];
+      if (A[i] === B[j]) {
+        dp[j+1] = prev+1;
+      } else if (dp[j] > dp[j+1]) {
+        dp[j+1] = dp[j];
+      }
+      prev = old;
+    }
+  }
+  return dp[M];
+}
+
+/**
  * 説明: 配列から k 個選ぶ全組合せを列挙する
  * 使い方: let cs = combinations(A,k)
  * 計算量: O(C(N,k) * k)
